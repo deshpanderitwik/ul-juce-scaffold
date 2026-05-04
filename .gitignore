@@ -1,0 +1,50 @@
+# Build output
+build/
+cmake-build-*/
+out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# JUCE artefacts
+JuceLibraryCode/
+*_artefacts/
+
+# Compiled binaries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.vst3
+*.component
+*.app
+
+# IDE / editor
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+.cache/
+compile_commands.json
+
+# macOS
+.DS_Store
+._*
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Logs / temp
+*.log
+*.tmp
+*.swp

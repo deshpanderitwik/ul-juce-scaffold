@@ -1,0 +1,128 @@
+# Project: JUCE WebView MIDI Plugin
+
+## What This Is
+
+A JUCE 8 VST3 plugin with an embedded web UI (WebBrowserComponent). The plugin acts as a MIDI generator — a Three.js-based visual environment runs in the web view, and events in that environment produce MIDI notes that get sent to the DAW (Ableton Live) via a lock-free ring buffer on the audio thread.
+
+Users route the plugin's MIDI output to another track with a synth to hear the notes.
+
+## Architecture
+
+### C++ Layer (rarely changes)
+- `PluginProcessor` — audio thread, transport state (atomics), lock-free MIDI queue (AbstractFifo)
+- `PluginEditor` — hosts WebBrowserComponent, bridges JS ↔ C++, serves web assets from BinaryData via resource provider
+
+### Web Layer (where all creative work happens)
+- `shell.js` — owns Three.js renderer/scene/camera, animation loop, experiment lifecycle, MIDI API, scale system, experiment selector UI, key/scale selector UI
+- One `.js` file per experiment at `web/` root (filename must match the experiment's `id`, e.g. `graph.js` registers as `'graph'`). `shell.js` dynamically loads each entry from its `EXPERIMENTS` manifest.
+
+### Experiment Contract
+Every experiment is an object with:
+- `id`, `name`, `description` (metadata)
+- `init(context)` — called once on first activation
+- `update(delta, transport)` — called every frame by the shell
+- `pause()`, `resume()`, `destroy()` — lifecycle hooks
+
+The `context` object provides:
+- `scene` — THREE.Scene
+- `camera` — THREE.OrthographicCamera
+- `renderer` — THREE.WebGLRenderer (read-only)
+- `midi.sendNoteOn(note, velocity, channel)`
+- `midi.sendNoteOff(note, channel)`
+- `midi.sendNote(note, velocity, channel, durationMs)`
+- `scale.getNotesInRange(low, high)` — get valid MIDI notes in current key/scale
+- `scale.getNoteForDegree(degree, octave)` — get MIDI note by scale degree
+- `scale.getScaleDegree(midiNote)` — get degree for a MIDI note
+- `scale.onChange(callback)` — subscribe to key/scale changes, returns unsubscribe fn
+- `scale.getKey()` — returns { root, scaleName }
+- `getTransport()` — returns { tempo, beatPosition, timeSigNumerator, timeSigDenominator, isPlaying }
+- `getSize()` — returns { width, height }
+
+Experiments do NOT call requestAnimationFrame or renderer.render(). The shell handles both.
+
+## Prototyping Workflow
+
+There is a dedicated experiment file for prototyping: `web/test.js`
+
+This is the scratchpad. All new ideas start here. The flow is:
+
+1. **Prototype in test.js.** Iterate fast, break things, try ideas. Don't worry about clean code.
+2. **When an idea is ready to keep:** Duplicate test.js to a new file at `web/` root with a descriptive name (e.g. `ascending-walk.js`). Add an entry for it to the `EXPERIMENTS` manifest in `shell.js` (`{ id, name, description }`) — `id` must match the filename without `.js`. Register it with `Shell.register(id, behavior)`. CMake's `file(GLOB web/*.js)` picks it up automatically; no edits to `CMakeLists.txt` or `index.html` needed.
+3. **Reset test.js** back to the blank template (see below) for the next idea.
+
+When I say "let's try something" or "prototype this" — work in test.js.
+When I say "let's keep this" or "package this up" — duplicate to a new file and reset test.js.
+When I say "new idea" or "start fresh" — reset test.js to the blank template.
+
+### Blank Test Template
+
+When resetting test.js, use this skeleton:
+
+```javascript
+const TestExperiment = {
+  id: 'test',
+  name: 'Test',
+  description: 'Prototyping scratchpad',
+
+  _group: null,
+  _context: null,
+  _unsubscribeScale: null,
+
+  init(context) {
+    this._context = context;
+    this._group = new THREE.Group();
+    context.scene.add(this._group);
+
+    this._unsubscribeScale = context.scale.onChange(() => {
+      this._rebuild();
+    });
+
+    this._rebuild();
+  },
+
+  _rebuild() {
+    // Clear existing objects
+    while (this._group.children.length) {
+      this._group.remove(this._group.children[0]);
+    }
+
+    const notes = this._context.scale.getNotesInRange(48, 72);
+    // Build your scene here using notes array
+  },
+
+  update(delta, transport) {
+    // Called every frame — update positions, check triggers, etc.
+  },
+
+  pause() {},
+  resume() {},
+
+  destroy() {
+    if (this._unsubscribeScale) this._unsubscribeScale();
+  },
+};
+
+Shell.register(TestExperiment);
+```
+
+## File Structure
+
+```
+web/
+├── index.html
+├── three.min.js
+├── matter.min.js          # available if an experiment needs physics
+├── shell.js
+├── test.js                # always exists, prototyping scratchpad
+├── graph.js               # finalized experiments live alongside shell.js
+├── scribbler.js
+└── ...
+```
+
+## Key Rules
+
+- **Never modify the C++ layer** unless explicitly asked. All creative work is in the web layer.
+- **The shell owns the render loop.** Experiments implement update(), they don't manage their own animation frames.
+- **Scale-aware:** Use context.scale to get valid notes. Never hardcode note values. Always subscribe to scale changes and rebuild when the key changes.
+- **MIDI only:** Experiments produce MIDI events, not audio. Sound comes from whatever synth the user has on the receiving track in Ableton.
+- **Dark aesthetic:** Keep visuals dark-themed, minimal, clean.
