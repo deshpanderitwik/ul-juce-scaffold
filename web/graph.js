@@ -178,9 +178,9 @@ Shell.register({
         } else {
           this._startCancel();
         }
-      } else {
-        // Released before the break completed — abort cleanly.
-        this._destroyDrag();
+      } else if (this._drag) {
+        // Released mid-stretch or mid-break — animate back to clean.
+        this._startSnapback();
       }
     } else {
       var rect = this._context.renderer.domElement.getBoundingClientRect();
@@ -485,6 +485,35 @@ Shell.register({
     d.duration     = this._cancelDuration;
   },
 
+  // Released during stretching or breaking — animate back to clean instead
+  // of snapping instantly. Source's tongue retracts; any partial bud merges
+  // back into the source.
+  _startSnapback() {
+    var d = this._drag;
+    if (!d) return;
+    var src = this._nodes[d.sourceIdx];
+
+    d.snapApexStart     = d.sourceApex;
+    d.snapBudScaleStart = d.budScale;
+    d.snapBudFromX      = d.budMesh.position.x;
+    d.snapBudFromY      = d.budMesh.position.y;
+
+    if (d.breakDirX !== undefined) {
+      d.snapDirX = d.breakDirX;
+      d.snapDirY = d.breakDirY;
+    } else {
+      var sdx  = d.cursorX - src.x;
+      var sdy  = d.cursorY - src.y;
+      var sd   = Math.sqrt(sdx * sdx + sdy * sdy);
+      d.snapDirX = sd > 0.001 ? sdx / sd : 1;
+      d.snapDirY = sd > 0.001 ? sdy / sd : 0;
+    }
+
+    d.phase    = 'snapback';
+    d.elapsed  = 0;
+    d.duration = 180;
+  },
+
   _destroyDrag() {
     if (!this._drag) return;
     var d = this._drag;
@@ -753,6 +782,48 @@ Shell.register({
       }
 
       if (ct >= 1) {
+        this._popNode(d.sourceIdx);
+        this._destroyDrag();
+      }
+    } else if (d.phase === 'snapback') {
+      var st = Math.min(1, d.elapsed / d.duration);
+      var se = 1 - (1 - st) * (1 - st);  // easeOutQuad
+
+      // Bud (if any) merges back to source.
+      var sbX = d.snapBudFromX + (src.x - d.snapBudFromX) * se;
+      var sbY = d.snapBudFromY + (src.y - d.snapBudFromY) * se;
+      d.budScale = d.snapBudScaleStart * (1 - se);
+
+      // Source's tongue retracts; direction follows the returning bud so the
+      // strand stays oriented sensibly even if the cursor wandered.
+      d.sourceApex = d.snapApexStart + (d.sourceRadius - d.snapApexStart) * se;
+      var sbdx = sbX - src.x;
+      var sbdy = sbY - src.y;
+      var sbd  = Math.sqrt(sbdx * sbdx + sbdy * sbdy);
+      var sDirX = sbd > 0.001 ? sbdx / sbd : d.snapDirX;
+      var sDirY = sbd > 0.001 ? sbdy / sbd : d.snapDirY;
+      this._deformSourceGeometry(sDirX, sDirY, d.sourceApex);
+
+      d.budMesh.visible = d.budScale > 0.05;
+      if (d.budMesh.visible) {
+        d.budMesh.position.set(sbX, sbY, 0.5);
+        d.budMesh.scale.set(d.budScale, d.budScale, 1);
+
+        var sSrcScale = src.springScale || 1.0;
+        var sAnchor   = d.sourceApex * sSrcScale;
+        if (sbd > sAnchor) {
+          var sApexX = src.x + sDirX * sAnchor;
+          var sApexY = src.y + sDirY * sAnchor;
+          this._updateStrandGeometry(sApexX, sApexY, sbX, sbY,
+                                     d.sourceRadius * d.budScale);
+        } else {
+          d.strandMesh.visible = false;
+        }
+      } else {
+        d.strandMesh.visible = false;
+      }
+
+      if (st >= 1) {
         this._popNode(d.sourceIdx);
         this._destroyDrag();
       }
