@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Source deformation — brainstorm</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: #0a0a0a;
+    color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; color: #eee; font-weight: 600; }
+  .intro {
+    font-size: 13px; color: #888; line-height: 1.6; margin: 0 0 24px;
+    max-width: 880px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    max-width: 1180px;
+  }
+  .panel {
+    background: #161616;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h2 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #eee;
+  }
+  .panel .desc {
+    font-size: 12px;
+    color: #777;
+    line-height: 1.5;
+    margin: 0 0 14px;
+  }
+  canvas {
+    display: block;
+    background: #0a0a0a;
+    border-radius: 4px;
+    cursor: crosshair;
+    width: 100%;
+    height: auto;
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  button {
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  button:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+  }
+  button:active { background: rgba(255, 255, 255, 0.25); }
+  .hint {
+    font-size: 11px;
+    color: #555;
+    margin: 8px 0 0;
+    font-style: italic;
+  }
+  @media (max-width: 1100px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Source deformation — brainstorm</h1>
+<p class="intro">
+  Comparing the current (buggy) implementation against the proposed approach where the
+  source's own circle geometry deforms into a tongue when the cursor crosses its perimeter.
+  Move your cursor over each canvas — the source is fixed in place; your cursor plays
+  the role of the drag pointer. Panels 3 and 4 add a target node and animate the drop.
+</p>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>1 · Current implementation (the bug)</h2>
+    <p class="desc">
+      Source mesh (slight gray) + a separate blob mesh covering its front half (pure white) —
+      two distinct meshes layered at the same position. When the cursor is inside the perimeter,
+      the blob's front-arc is locked to the +x side (no direction yet), so it stays fixed
+      regardless of where you point. When you cross out, it snaps to face the cursor.
+    </p>
+    <canvas id="c1" width="500" height="320"></canvas>
+    <p class="hint">Move cursor around inside the source — the white half stays put. Move outside — it snaps.</p>
+  </div>
+
+  <div class="panel">
+    <h2>2 · Proposed: deform source directly</h2>
+    <p class="desc">
+      One mesh. The source's perimeter vertices are displaced each frame: vertices on the
+      back stay on the original circle; vertices on the front follow a bell curve whose
+      peak is <code>max(r, dist)</code> along the pull axis. Inside the perimeter, the
+      formula collapses to the original circle exactly.
+    </p>
+    <canvas id="c2" width="500" height="320"></canvas>
+    <p class="hint">Move cursor in and out. Tongue only emerges past the orange ring.</p>
+  </div>
+
+  <div class="panel">
+    <h2>3 · Absorb — Option A · pure retract</h2>
+    <p class="desc">
+      On drop, tongue retracts (peak distance shrinks back to r) along its current direction.
+      Target lights up separately once retraction completes. Simpler, less visually rich —
+      the "selection transfer" is implied by the source going gray and the target going white.
+    </p>
+    <canvas id="c3" width="500" height="320"></canvas>
+    <div class="controls">
+      <button data-act="drop-a">Drop on target</button>
+      <button data-act="reset-a">Reset</button>
+    </div>
+    <p class="hint">Drag the cursor outside the source first, then click "Drop on target".</p>
+  </div>
+
+  <div class="panel">
+    <h2>4 · Absorb — Option B · sweep + retract</h2>
+    <p class="desc">
+      On drop, the tongue's peak first <em>sweeps</em> from cursor position to target's
+      center (selection flows across the canvas), then retracts. Target activates as the
+      tongue arrives. Richer narrative: source visibly hands the selection to target.
+    </p>
+    <canvas id="c4" width="500" height="320"></canvas>
+    <div class="controls">
+      <button data-act="drop-b">Drop on target</button>
+      <button data-act="reset-b">Reset</button>
+    </div>
+    <p class="hint">Same setup — drag outside, click "Drop on target", compare to option A.</p>
+  </div>
+
+</div>
+
+<script>
+// =======================================================================
+// Constants
+// =======================================================================
+const SRC_X = 160, SRC_Y = 160;
+const TGT_X = 360, TGT_Y = 160;
+const RADIUS = 36;
+
+// =======================================================================
+// Core math: deform the source's circle into a tongue
+// =======================================================================
+// peakOverride: optional explicit peak distance (used during retract animations
+//   where we want to control the peak independently from the cursor's position).
+function deformedSourceVerts(srcX, srcY, peakX, peakY, r, peakOverride) {
+  const dx = peakX - srcX;
+  const dy = peakY - srcY;
+  const rawDist = Math.hypot(dx, dy);
+
+  const peakDist = peakOverride !== undefined
+    ? peakOverride
+    : Math.max(r, rawDist);
+  const phi = rawDist > 0.001 ? Math.atan2(dy, dx) : 0;
+  const cosPhi = Math.cos(phi);
+  const sinPhi = Math.sin(phi);
+
+  const N = 64;
+  const verts = [];
+  for (let i = 0; i < N; i++) {
+    const theta = (i / N) * Math.PI * 2;
+    let delta = theta - phi;
+    while (delta >  Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+
+    let lx, ly;
+    if (Math.abs(delta) > Math.PI / 2) {
+      // Back side — stays on the original circle.
+      lx = r * Math.cos(theta);
+      ly = r * Math.sin(theta);
+    } else {
+      // Front side — follows the bell-shaped tongue curve.
+      const alpha = (delta + Math.PI / 2) / Math.PI;       // 0 .. 1
+      const forward = peakDist * Math.sin(Math.PI * alpha);
+      const perp    = -r * Math.cos(Math.PI * alpha);
+      lx = forward * cosPhi - perp * sinPhi;
+      ly = forward * sinPhi + perp * cosPhi;
+    }
+    verts.push([srcX + lx, srcY + ly]);
+  }
+  return verts;
+}
+
+// =======================================================================
+// Drawing helpers
+// =======================================================================
+function fillPolygon(ctx, verts, fillStyle) {
+  ctx.beginPath();
+  verts.forEach(([x, y], i) =>
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+  ctx.closePath();
+  ctx.fillStyle = fillStyle;
+  ctx.fill();
+}
+
+function fillCircle(ctx, x, y, r, fill) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+function strokeCircle(ctx, x, y, r, stroke, w = 1) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = w;
+  ctx.stroke();
+}
+
+function drawCursor(ctx, x, y) {
+  ctx.fillStyle = '#ffd84d';
+  ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+function drawLabel(ctx, text, x, y, color = '#888') {
+  ctx.fillStyle = color;
+  ctx.font = '11px -apple-system, sans-serif';
+  ctx.fillText(text, x, y);
+}
+
+function clearBg(ctx, canvas) {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+const easeOutQuad   = t => 1 - (1 - t) * (1 - t);
+const easeInOutQuad = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+// =======================================================================
+// Panel 1 — Current implementation (the bug)
+// =======================================================================
+function setupCurrentBug(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = { cursorX: SRC_X + 70, cursorY: SRC_Y - 28 };
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+
+    // Source mesh — slight gray-white to show the layering seam vs blob.
+    fillCircle(ctx, SRC_X, SRC_Y, RADIUS, '#c4c4c4');
+
+    // The current implementation's effective-cursor logic.
+    const dx = state.cursorX - SRC_X;
+    const dy = state.cursorY - SRC_Y;
+    const rawDist = Math.hypot(dx, dy);
+    const effDist = Math.max(0, rawDist - RADIUS);
+
+    // BUG: phi is hardcoded to 0 when cursor is inside source's circle.
+    let phi;
+    if (effDist < 0.001) phi = 0;
+    else                 phi = Math.atan2(dy, dx);
+
+    let effX = SRC_X, effY = SRC_Y;
+    if (rawDist > 0.001) {
+      effX = SRC_X + (dx / rawDist) * effDist;
+      effY = SRC_Y + (dy / rawDist) * effDist;
+    }
+
+    // Blob's cursor-front-arc — pure white half-circle, drawn on top of source.
+    const startA = phi - Math.PI / 2;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(effX, effY);
+    for (let i = 0; i <= 32; i++) {
+      const a = startA + (i / 32) * Math.PI;
+      ctx.lineTo(effX + RADIUS * Math.cos(a), effY + RADIUS * Math.sin(a));
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    drawCursor(ctx, state.cursorX, state.cursorY);
+
+    drawLabel(ctx, 'source mesh (#c4c4c4) — full circle, slightly gray', 16, 24);
+    drawLabel(ctx, 'blob arc (#ffffff) — fixed +x side when cursor inside', 16, 40);
+    drawLabel(ctx,
+      rawDist < RADIUS
+        ? 'cursor INSIDE → blob arc locked to right side (the bug)'
+        : 'cursor OUTSIDE → blob arc snaps to follow cursor',
+      16, canvas.height - 16,
+      rawDist < RADIUS ? '#ffb84d' : '#9cf');
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Panel 2 — Proposed source deformation
+// =======================================================================
+function setupProposed(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = { cursorX: SRC_X + 70, cursorY: SRC_Y - 28 };
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+
+    // Subtle orange perimeter ring — marks the threshold for the user's eye.
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.25)');
+
+    const verts = deformedSourceVerts(SRC_X, SRC_Y, state.cursorX, state.cursorY, RADIUS);
+    fillPolygon(ctx, verts, '#ffffff');
+
+    drawCursor(ctx, state.cursorX, state.cursorY);
+
+    const rawDist = Math.hypot(state.cursorX - SRC_X, state.cursorY - SRC_Y);
+
+    drawLabel(ctx, 'single mesh — source\'s perimeter vertices deformed', 16, 24);
+    drawLabel(ctx,
+      rawDist < RADIUS
+        ? 'cursor inside ring → circle stays a circle'
+        : 'cursor past ring → tongue extends to cursor',
+      16, canvas.height - 16,
+      rawDist < RADIUS ? '#9c9' : '#9cf');
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Panel 3 — Option A · pure retract
+// =======================================================================
+function setupOptionA(canvasId, dropBtnAct, resetBtnAct) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = {
+    cursorX: SRC_X + 110,
+    cursorY: SRC_Y - 50,
+    animation: null,
+    sourceInactive: false,
+    targetActive: false,
+  };
+
+  canvas.addEventListener('mousemove', e => {
+    if (state.animation || state.sourceInactive) return;
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  document.querySelector(`[data-act="${dropBtnAct}"]`).addEventListener('click', () => {
+    if (state.animation || state.sourceInactive) return;
+    const dx = state.cursorX - SRC_X;
+    const dy = state.cursorY - SRC_Y;
+    const rawDist = Math.hypot(dx, dy);
+    if (rawDist <= RADIUS) return;
+
+    state.animation = {
+      start: performance.now(),
+      duration: 320,
+      startPeakDist: rawDist,
+      phi: Math.atan2(dy, dx),
+    };
+  });
+
+  document.querySelector(`[data-act="${resetBtnAct}"]`).addEventListener('click', () => {
+    state.animation = null;
+    state.sourceInactive = false;
+    state.targetActive = false;
+    state.cursorX = SRC_X + 110;
+    state.cursorY = SRC_Y - 50;
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+
+    // Perimeter ring
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.25)');
+
+    // Target
+    const tgtFill = state.targetActive ? '#ffffff' : '#3a3a3a';
+    fillCircle(ctx, TGT_X, TGT_Y, RADIUS, tgtFill);
+    strokeCircle(ctx, TGT_X, TGT_Y, RADIUS, 'rgba(255,255,255,0.18)');
+
+    if (state.animation) {
+      const a = state.animation;
+      const t = Math.min(1, (performance.now() - a.start) / a.duration);
+      const peakDist = a.startPeakDist + (RADIUS - a.startPeakDist) * easeOutQuad(t);
+      const px = SRC_X + Math.cos(a.phi) * peakDist;
+      const py = SRC_Y + Math.sin(a.phi) * peakDist;
+      const verts = deformedSourceVerts(SRC_X, SRC_Y, px, py, RADIUS, peakDist);
+      fillPolygon(ctx, verts, '#ffffff');
+      if (t >= 1) {
+        state.animation = null;
+        state.sourceInactive = true;
+        state.targetActive = true;
+      }
+    } else if (state.sourceInactive) {
+      // Source is now inactive
+      fillCircle(ctx, SRC_X, SRC_Y, RADIUS, '#3a3a3a');
+    } else {
+      const verts = deformedSourceVerts(SRC_X, SRC_Y, state.cursorX, state.cursorY, RADIUS);
+      fillPolygon(ctx, verts, '#ffffff');
+      drawCursor(ctx, state.cursorX, state.cursorY);
+    }
+
+    drawLabel(ctx, 'Option A · retract along current direction, then activate target', 16, 24);
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Panel 4 — Option B · sweep + retract
+// =======================================================================
+function setupOptionB(canvasId, dropBtnAct, resetBtnAct) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = {
+    cursorX: SRC_X + 110,
+    cursorY: SRC_Y - 50,
+    animation: null,
+    sourceInactive: false,
+    targetActive: false,
+  };
+
+  canvas.addEventListener('mousemove', e => {
+    if (state.animation || state.sourceInactive) return;
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  document.querySelector(`[data-act="${dropBtnAct}"]`).addEventListener('click', () => {
+    if (state.animation || state.sourceInactive) return;
+    const dx = state.cursorX - SRC_X;
+    const dy = state.cursorY - SRC_Y;
+    const rawDist = Math.hypot(dx, dy);
+    if (rawDist <= RADIUS) return;
+
+    state.animation = {
+      start: performance.now(),
+      sweepDuration: 320,
+      retractDuration: 260,
+      cursorStart: { x: state.cursorX, y: state.cursorY },
+    };
+  });
+
+  document.querySelector(`[data-act="${resetBtnAct}"]`).addEventListener('click', () => {
+    state.animation = null;
+    state.sourceInactive = false;
+    state.targetActive = false;
+    state.cursorX = SRC_X + 110;
+    state.cursorY = SRC_Y - 50;
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.25)');
+
+    if (state.animation) {
+      const a = state.animation;
+      const elapsed = performance.now() - a.start;
+      const sweepT   = Math.min(1, elapsed / a.sweepDuration);
+      const retractT = Math.max(0, Math.min(1,
+                       (elapsed - a.sweepDuration) / a.retractDuration));
+
+      let px, py, peakDistOverride;
+      if (sweepT < 1) {
+        // Phase 1 — sweep peak from cursor to target
+        const e1 = easeInOutQuad(sweepT);
+        px = a.cursorStart.x + (TGT_X - a.cursorStart.x) * e1;
+        py = a.cursorStart.y + (TGT_Y - a.cursorStart.y) * e1;
+        peakDistOverride = undefined;  // natural peak = distance to peak point
+      } else {
+        // Phase 2 — retract peak distance from |S→T| to r, direction toward target
+        const targetDist = Math.hypot(TGT_X - SRC_X, TGT_Y - SRC_Y);
+        const phi = Math.atan2(TGT_Y - SRC_Y, TGT_X - SRC_X);
+        const peakDist = targetDist + (RADIUS - targetDist) * easeOutQuad(retractT);
+        px = SRC_X + Math.cos(phi) * peakDist;
+        py = SRC_Y + Math.sin(phi) * peakDist;
+        peakDistOverride = peakDist;
+        // Activate target as the tongue arrives
+        if (!state.targetActive) state.targetActive = true;
+      }
+
+      // Target — visible throughout, lights up as tongue arrives
+      const tgtFill = state.targetActive ? '#ffffff' : '#3a3a3a';
+      fillCircle(ctx, TGT_X, TGT_Y, RADIUS, tgtFill);
+      strokeCircle(ctx, TGT_X, TGT_Y, RADIUS, 'rgba(255,255,255,0.18)');
+
+      const verts = deformedSourceVerts(SRC_X, SRC_Y, px, py, RADIUS, peakDistOverride);
+      fillPolygon(ctx, verts, '#ffffff');
+
+      if (retractT >= 1) {
+        state.animation = null;
+        state.sourceInactive = true;
+      }
+    } else {
+      // Post-animation: source inactive, target active
+      const tgtFill = state.targetActive ? '#ffffff' : '#3a3a3a';
+      fillCircle(ctx, TGT_X, TGT_Y, RADIUS, tgtFill);
+      strokeCircle(ctx, TGT_X, TGT_Y, RADIUS, 'rgba(255,255,255,0.18)');
+
+      if (state.sourceInactive) {
+        fillCircle(ctx, SRC_X, SRC_Y, RADIUS, '#3a3a3a');
+      } else {
+        const verts = deformedSourceVerts(SRC_X, SRC_Y, state.cursorX, state.cursorY, RADIUS);
+        fillPolygon(ctx, verts, '#ffffff');
+        drawCursor(ctx, state.cursorX, state.cursorY);
+      }
+    }
+
+    drawLabel(ctx, 'Option B · sweep peak to target, then retract', 16, 24);
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Initialize and start render loop
+// =======================================================================
+const panels = [
+  setupCurrentBug('c1'),
+  setupProposed('c2'),
+  setupOptionA('c3', 'drop-a', 'reset-a'),
+  setupOptionB('c4', 'drop-b', 'reset-b'),
+];
+
+function loop() {
+  for (const p of panels) p.render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+</body>
+</html>

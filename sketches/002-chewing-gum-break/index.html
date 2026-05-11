@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Chewing gum break-off — sketch 002</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: #0a0a0a; color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; color: #eee; font-weight: 600; }
+  .intro {
+    font-size: 13px; color: #888; line-height: 1.6; margin: 0 0 24px;
+    max-width: 900px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    max-width: 1180px;
+  }
+  .panel { background: #161616; border-radius: 8px; padding: 16px; }
+  .panel h2 { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: #eee; }
+  .panel .desc { font-size: 12px; color: #777; line-height: 1.5; margin: 0 0 14px; }
+  canvas {
+    display: block; background: #0a0a0a; border-radius: 4px;
+    cursor: crosshair; width: 100%; height: auto;
+  }
+  .controls { display: flex; gap: 8px; margin-top: 12px; }
+  button {
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #ccc; border-radius: 4px; cursor: pointer;
+    font-size: 12px; font-family: inherit;
+  }
+  button:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+  button:active { background: rgba(255, 255, 255, 0.25); }
+  .hint {
+    font-size: 11px; color: #555;
+    margin: 8px 0 0; font-style: italic;
+  }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>Chewing gum break-off</h1>
+<p class="intro">
+  Breaking the drag into phases. <strong>A:</strong> source's circle deforms into a tongue
+  as the cursor pulls (no break yet). <strong>B:</strong> at the break threshold, a new circle
+  pops out at the cursor and the tongue retracts — a sticky strand stays between them.
+  <strong>C:</strong> stable two-circle state, strand stretches with distance.
+  Last panel combines all phases plus the drop animation onto a target.
+</p>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>1 · Phase A — pure stretch (no break)</h2>
+    <p class="desc">
+      Source's perimeter vertices deform into a tongue. The apex tracks the cursor up to
+      the orange break threshold. Past that, the apex stays clamped — that's where phase
+      B would kick in.
+    </p>
+    <canvas id="c1" width="500" height="320"></canvas>
+    <p class="hint">Move cursor in and out of the orange ring. Tongue caps at the threshold.</p>
+  </div>
+
+  <div class="panel">
+    <h2>2 · Phase C — two circles + strand (steady state)</h2>
+    <p class="desc">
+      Post-break state. Source is back to a clean circle. A bud lives at the cursor. A thin
+      strand connects them, thinning as the distance grows — the chewing-gum stretch.
+    </p>
+    <canvas id="c2" width="500" height="320"></canvas>
+    <p class="hint">Move cursor away from source. Strand thins as it stretches.</p>
+  </div>
+
+  <div class="panel">
+    <h2>3 · Phase B — break animation</h2>
+    <p class="desc">
+      The transition itself. Tongue retracts from cursor back to source's perimeter, while
+      the bud emerges at the cursor (scale 0→1) and the strand forms between them. ~280ms.
+    </p>
+    <canvas id="c3" width="500" height="320"></canvas>
+    <div class="controls">
+      <button data-act="break-3">Break</button>
+    </div>
+    <p class="hint">Click "Break" to play the transition. Click anywhere on the canvas to reset.</p>
+  </div>
+
+  <div class="panel">
+    <h2>4 · Combined — full drag with drop</h2>
+    <p class="desc">
+      All phases triggered by the drag itself. Stretch → break (auto) → follow → drop on
+      target. On drop, the bud merges into the target while the strand snaps free and
+      source returns to inactive.
+    </p>
+    <canvas id="c4" width="500" height="320"></canvas>
+    <div class="controls">
+      <button data-act="drop-4">Drop on target</button>
+    </div>
+    <p class="hint">Drag past the orange threshold, then click "Drop on target". Click anywhere on the canvas to reset.</p>
+  </div>
+
+</div>
+
+<script>
+// =======================================================================
+// Constants
+// =======================================================================
+const SRC_X = 130, SRC_Y = 160;
+const TGT_X = 380, TGT_Y = 160;
+const RADIUS = 30;
+const BREAK_THRESHOLD = 70;     // cursor distance at which break triggers
+const BREAK_DURATION = 280;      // ms
+const DROP_DURATION = 520;       // ms
+const STRAND_BASE_WIDTH = 9;
+
+// =======================================================================
+// Math
+// =======================================================================
+function deformedSourceVerts(srcX, srcY, peakX, peakY, r, peakOverride) {
+  const dx = peakX - srcX;
+  const dy = peakY - srcY;
+  const rawDist = Math.hypot(dx, dy);
+  const peakDist = peakOverride !== undefined
+    ? peakOverride
+    : Math.max(r, rawDist);
+  const phi = rawDist > 0.001 ? Math.atan2(dy, dx) : 0;
+  const cosPhi = Math.cos(phi);
+  const sinPhi = Math.sin(phi);
+
+  const N = 64;
+  const verts = [];
+  for (let i = 0; i < N; i++) {
+    const theta = (i / N) * Math.PI * 2;
+    let delta = theta - phi;
+    while (delta >  Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+
+    let lx, ly;
+    if (Math.abs(delta) > Math.PI / 2) {
+      lx = r * Math.cos(theta);
+      ly = r * Math.sin(theta);
+    } else {
+      const alpha = (delta + Math.PI / 2) / Math.PI;
+      const forward = peakDist * Math.sin(Math.PI * alpha);
+      const perp    = -r * Math.cos(Math.PI * alpha);
+      lx = forward * cosPhi - perp * sinPhi;
+      ly = forward * sinPhi + perp * cosPhi;
+    }
+    verts.push([srcX + lx, srcY + ly]);
+  }
+  return verts;
+}
+
+function getCursorState(cx, cy, sx, sy) {
+  const dx = cx - sx;
+  const dy = cy - sy;
+  const dist = Math.hypot(dx, dy);
+  const dirX = dist > 0.001 ? dx / dist : 1;
+  const dirY = dist > 0.001 ? dy / dist : 0;
+  return { dist, dirX, dirY };
+}
+
+const easeOutQuad   = t => 1 - (1 - t) * (1 - t);
+const easeInOutQuad = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+// =======================================================================
+// Renderers
+// =======================================================================
+function fillPolygon(ctx, verts, fill) {
+  ctx.beginPath();
+  verts.forEach(([x, y], i) =>
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+function fillCircle(ctx, x, y, r, fill) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+function strokeCircle(ctx, x, y, r, stroke, w = 1) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = w;
+  ctx.stroke();
+}
+
+function clearBg(ctx, canvas) {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawCursor(ctx, x, y) {
+  ctx.fillStyle = '#ffd84d';
+  ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+function drawLabel(ctx, text, x, y, color = '#888') {
+  ctx.fillStyle = color;
+  ctx.font = '11px -apple-system, sans-serif';
+  ctx.fillText(text, x, y);
+}
+
+function renderTongue(ctx, sx, sy, dirX, dirY, peakDist, r, color) {
+  const apexX = sx + dirX * peakDist;
+  const apexY = sy + dirY * peakDist;
+  const verts = deformedSourceVerts(sx, sy, apexX, apexY, r, peakDist);
+  fillPolygon(ctx, verts, color);
+}
+
+function renderStrand(ctx, apexX, apexY, budX, budY, budRadius, color) {
+  const dx = budX - apexX;
+  const dy = budY - apexY;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 0.001 || budRadius < 0.5) return;
+
+  const ux = dx / dist, uy = dy / dist;
+  const px = -uy, py = ux;
+
+  const budConnectX = budX - ux * budRadius;
+  const budConnectY = budY - uy * budRadius;
+
+  // Strand thins with stretch (chewing-gum effect).
+  const stretchFactor = Math.max(0.30, 1 - dist / 140);
+  const N = 16;
+  const halfWidthAt = u => {
+    // Bell taper — slightly narrower in the middle.
+    const bell = 1 - 0.35 * Math.sin(Math.PI * u);
+    return STRAND_BASE_WIDTH * 0.5 * stretchFactor * bell;
+  };
+
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const u = i / N;
+    const cx = apexX + (budConnectX - apexX) * u;
+    const cy = apexY + (budConnectY - apexY) * u;
+    const w  = halfWidthAt(u);
+    if (i === 0) ctx.moveTo(cx + px * w, cy + py * w);
+    else         ctx.lineTo(cx + px * w, cy + py * w);
+  }
+  for (let i = N; i >= 0; i--) {
+    const u = i / N;
+    const cx = apexX + (budConnectX - apexX) * u;
+    const cy = apexY + (budConnectY - apexY) * u;
+    const w  = halfWidthAt(u);
+    ctx.lineTo(cx - px * w, cy - py * w);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function renderBud(ctx, x, y, scale, r, color) {
+  if (scale < 0.01) return;
+  fillCircle(ctx, x, y, r * scale, color);
+}
+
+// =======================================================================
+// Panel 1 — Phase A · pure stretch
+// =======================================================================
+function setupPhaseA(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = { cursorX: SRC_X + 50, cursorY: SRC_Y - 25 };
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+
+    strokeCircle(ctx, SRC_X, SRC_Y, BREAK_THRESHOLD, 'rgba(255, 120, 80, 0.30)');
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.15)');
+
+    const { dist, dirX, dirY } = getCursorState(state.cursorX, state.cursorY, SRC_X, SRC_Y);
+    const peakDist = Math.min(dist, BREAK_THRESHOLD);
+
+    renderTongue(ctx, SRC_X, SRC_Y, dirX, dirY, peakDist, RADIUS, '#ffffff');
+    drawCursor(ctx, state.cursorX, state.cursorY);
+
+    drawLabel(ctx, 'phase A · tongue tracks cursor up to threshold', 16, 24);
+    drawLabel(ctx,
+      dist > BREAK_THRESHOLD
+        ? 'past threshold — in combined view this would trigger phase B'
+        : 'within threshold — tongue extending freely',
+      16, canvas.height - 16,
+      dist > BREAK_THRESHOLD ? '#ffb84d' : '#9c9');
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Panel 2 — Phase C · steady state (two circles + strand)
+// =======================================================================
+function setupPhaseC(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = { cursorX: SRC_X + 110, cursorY: SRC_Y - 40 };
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.15)');
+
+    const { dist, dirX, dirY } = getCursorState(state.cursorX, state.cursorY, SRC_X, SRC_Y);
+
+    // Source — clean circle (post-break, still active).
+    fillCircle(ctx, SRC_X, SRC_Y, RADIUS, '#ffffff');
+
+    if (dist > RADIUS) {
+      const apexX = SRC_X + dirX * RADIUS;
+      const apexY = SRC_Y + dirY * RADIUS;
+      renderStrand(ctx, apexX, apexY, state.cursorX, state.cursorY, RADIUS, '#ffffff');
+      renderBud(ctx, state.cursorX, state.cursorY, 1, RADIUS, '#ffffff');
+    }
+
+    drawCursor(ctx, state.cursorX, state.cursorY);
+
+    drawLabel(ctx, 'phase C · source clean, bud at cursor, strand stretches', 16, 24);
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Panel 3 — Phase B · break animation
+// =======================================================================
+function setupBreakAnim(canvasId, breakAct) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = {
+    cursorX: SRC_X + BREAK_THRESHOLD + 30,
+    cursorY: SRC_Y - 25,
+    animation: null,
+    broken: false,
+  };
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  document.querySelector(`[data-act="${breakAct}"]`).addEventListener('click', () => {
+    if (state.animation || state.broken) return;
+    const dist = Math.hypot(state.cursorX - SRC_X, state.cursorY - SRC_Y);
+    state.animation = {
+      start: performance.now(),
+      duration: BREAK_DURATION,
+      initialApex: Math.min(dist, BREAK_THRESHOLD + 40),
+    };
+  });
+
+  canvas.addEventListener('click', e => {
+    state.animation = null;
+    state.broken = false;
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  function render() {
+    clearBg(ctx, canvas);
+    strokeCircle(ctx, SRC_X, SRC_Y, BREAK_THRESHOLD, 'rgba(255, 120, 80, 0.30)');
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.15)');
+
+    const { dist, dirX, dirY } = getCursorState(state.cursorX, state.cursorY, SRC_X, SRC_Y);
+
+    if (state.animation) {
+      const a = state.animation;
+      const t = Math.min(1, (performance.now() - a.start) / a.duration);
+      const e = easeOutQuad(t);
+
+      // Source apex retracts from initial to RADIUS
+      const apex = a.initialApex + (RADIUS - a.initialApex) * e;
+      renderTongue(ctx, SRC_X, SRC_Y, dirX, dirY, apex, RADIUS, '#ffffff');
+
+      // Bud grows; strand forms
+      const budScale = e;
+      if (budScale > 0.05) {
+        const apexX = SRC_X + dirX * apex;
+        const apexY = SRC_Y + dirY * apex;
+        renderStrand(ctx, apexX, apexY, state.cursorX, state.cursorY, RADIUS * budScale, '#ffffff');
+        renderBud(ctx, state.cursorX, state.cursorY, budScale, RADIUS, '#ffffff');
+      }
+
+      if (t >= 1) {
+        state.animation = null;
+        state.broken = true;
+      }
+    } else if (state.broken) {
+      // Post-break peanut
+      fillCircle(ctx, SRC_X, SRC_Y, RADIUS, '#ffffff');
+      if (dist > RADIUS) {
+        const apexX = SRC_X + dirX * RADIUS;
+        const apexY = SRC_Y + dirY * RADIUS;
+        renderStrand(ctx, apexX, apexY, state.cursorX, state.cursorY, RADIUS, '#ffffff');
+        renderBud(ctx, state.cursorX, state.cursorY, 1, RADIUS, '#ffffff');
+      }
+    } else {
+      // Pre-break tongue
+      const apex = Math.min(dist, BREAK_THRESHOLD + 40);
+      renderTongue(ctx, SRC_X, SRC_Y, dirX, dirY, apex, RADIUS, '#ffffff');
+    }
+
+    drawCursor(ctx, state.cursorX, state.cursorY);
+
+    const label = state.animation
+      ? 'breaking — tongue retracts, bud grows, strand forms'
+      : state.broken
+        ? 'post-break — peanut shape, bud follows cursor'
+        : 'pre-break — drag cursor to wherever you want bud to appear, then click Break';
+    const color = state.animation ? '#9cf' : state.broken ? '#9c9' : '#bbb';
+    drawLabel(ctx, label, 16, 24, color);
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Panel 4 — Combined · full drag + drop
+// =======================================================================
+function setupCombined(canvasId, dropAct) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const state = {
+    cursorX: SRC_X + 50,
+    cursorY: SRC_Y,
+    phase: 'A',            // A · B · C · drop · done
+    breakStart: 0,
+    dropStart: 0,
+    dropFromX: 0, dropFromY: 0,
+    budScale: 0,
+    sourceApex: RADIUS,
+    targetActive: false,
+  };
+
+  canvas.addEventListener('mousemove', e => {
+    if (state.phase === 'drop' || state.phase === 'done') return;
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  document.querySelector(`[data-act="${dropAct}"]`).addEventListener('click', () => {
+    if (state.phase !== 'C') return;
+    state.phase = 'drop';
+    state.dropStart = performance.now();
+    state.dropFromX = state.cursorX;
+    state.dropFromY = state.cursorY;
+  });
+
+  canvas.addEventListener('click', e => {
+    state.phase = 'A';
+    state.budScale = 0;
+    state.sourceApex = RADIUS;
+    state.targetActive = false;
+    const rect = canvas.getBoundingClientRect();
+    state.cursorX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    state.cursorY = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  });
+
+  function update() {
+    const { dist } = getCursorState(state.cursorX, state.cursorY, SRC_X, SRC_Y);
+
+    if (state.phase === 'A') {
+      state.sourceApex = Math.min(dist, BREAK_THRESHOLD);
+      if (dist > BREAK_THRESHOLD) {
+        state.phase = 'B';
+        state.breakStart = performance.now();
+      }
+    } else if (state.phase === 'B') {
+      const t = Math.min(1, (performance.now() - state.breakStart) / BREAK_DURATION);
+      const e = easeOutQuad(t);
+      state.sourceApex = BREAK_THRESHOLD + (RADIUS - BREAK_THRESHOLD) * e;
+      state.budScale   = e;
+      if (t >= 1) state.phase = 'C';
+    } else if (state.phase === 'C') {
+      state.sourceApex = RADIUS;
+      state.budScale = 1;
+    } else if (state.phase === 'drop') {
+      const t = Math.min(1, (performance.now() - state.dropStart) / DROP_DURATION);
+      const e = easeInOutQuad(t);
+      // Bud moves from drop start to target
+      state.cursorX = state.dropFromX + (TGT_X - state.dropFromX) * e;
+      state.cursorY = state.dropFromY + (TGT_Y - state.dropFromY) * e;
+      // Bud shrinks into target in the last 30%
+      state.budScale = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3;
+      // Target activates as bud begins merging
+      if (t >= 0.6 && !state.targetActive) state.targetActive = true;
+      if (t >= 1) state.phase = 'done';
+    }
+  }
+
+  function render() {
+    clearBg(ctx, canvas);
+    update();
+
+    // Threshold ring & source perimeter
+    strokeCircle(ctx, SRC_X, SRC_Y, BREAK_THRESHOLD, 'rgba(255, 120, 80, 0.20)');
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.15)');
+
+    // Target
+    const tgtFill = state.targetActive ? '#ffffff' : '#3a3a3a';
+    fillCircle(ctx, TGT_X, TGT_Y, RADIUS, tgtFill);
+    strokeCircle(ctx, TGT_X, TGT_Y, RADIUS, 'rgba(255,255,255,0.18)');
+
+    // Source
+    const sourceColor = state.phase === 'done' ? '#3a3a3a' : '#ffffff';
+    if (state.phase === 'A' || state.phase === 'B') {
+      const { dirX, dirY } = getCursorState(state.cursorX, state.cursorY, SRC_X, SRC_Y);
+      renderTongue(ctx, SRC_X, SRC_Y, dirX, dirY, state.sourceApex, RADIUS, sourceColor);
+    } else {
+      fillCircle(ctx, SRC_X, SRC_Y, RADIUS, sourceColor);
+    }
+
+    // Strand + bud
+    if (state.budScale > 0.05 && state.phase !== 'done') {
+      const dxB = state.cursorX - SRC_X;
+      const dyB = state.cursorY - SRC_Y;
+      const distB = Math.hypot(dxB, dyB);
+      if (distB > 0.001) {
+        const apexX = SRC_X + (dxB / distB) * state.sourceApex;
+        const apexY = SRC_Y + (dyB / distB) * state.sourceApex;
+        renderStrand(ctx, apexX, apexY, state.cursorX, state.cursorY, RADIUS * state.budScale, '#ffffff');
+      }
+      renderBud(ctx, state.cursorX, state.cursorY, state.budScale, RADIUS, '#ffffff');
+    }
+
+    if (state.phase !== 'drop' && state.phase !== 'done') {
+      drawCursor(ctx, state.cursorX, state.cursorY);
+    }
+
+    const phaseLabels = {
+      A: 'phase A · stretching (drag past orange ring to break)',
+      B: 'phase B · breaking off',
+      C: 'phase C · two circles + strand (drop on target →)',
+      drop: 'dropping — bud merging into target',
+      done: 'done — selection transferred',
+    };
+    const phaseColors = {
+      A: '#bbb', B: '#9cf', C: '#9c9', drop: '#fc9', done: '#999',
+    };
+    drawLabel(ctx, phaseLabels[state.phase], 16, 24, phaseColors[state.phase]);
+  }
+
+  return { render };
+}
+
+// =======================================================================
+// Init + loop
+// =======================================================================
+const panels = [
+  setupPhaseA('c1'),
+  setupPhaseC('c2'),
+  setupBreakAnim('c3', 'break-3'),
+  setupCombined('c4', 'drop-4'),
+];
+
+function loop() {
+  for (const p of panels) p.render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+</body>
+</html>

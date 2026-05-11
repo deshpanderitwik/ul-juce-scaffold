@@ -6,10 +6,29 @@ Shell.register({
   _group: null,
   _context: null,
   _unsubscribeScale: null,
-  _onClick: null,
+  _onPointerDown: null,
+  _onPointerMove: null,
+  _onPointerUp: null,
+  _onPointerCancel: null,
   _onDblClick: null,
-  _onMouseMove: null,
   _hoveredIndex: -1,
+  _isPressed: false,
+  _pressIndex: -1,
+  _pressX: 0,
+  _pressY: 0,
+  _dragThreshold: 5,
+  _isDragging: false,
+  _dragSourceIndex: -1,
+  _drag: null,
+
+  // Chewing-gum drag tuning
+  _pExponent:        0.60,
+  _strainThreshold:  30,
+  _breakDuration:    280,
+  _dropDuration:     150,
+  _cancelDuration:   220,
+  _strandBaseWidth:  9,
+  _strandSegments:   16,
 
   _nodes: [],         // { mesh, labelSprite, midiNote, degree, octave, ring, angle, x, y, active, flashTimer }
   _edges: [],         // { line, fromIndex, toIndex }
@@ -77,20 +96,34 @@ Shell.register({
     var self = this;
     var canvas = this._context.renderer.domElement;
 
-    this._onClick = function (e) { self._handleClick(e); };
-    this._onDblClick = function (e) { self._handleDblClick(e); };
-    this._onMouseMove = function (e) { self._handleMouseMove(e); };
+    this._onPointerDown   = function (e) { self._handlePointerDown(e); };
+    this._onPointerMove   = function (e) { self._handlePointerMove(e); };
+    this._onPointerUp     = function (e) { self._handlePointerUp(e); };
+    this._onPointerCancel = function (e) { self._handlePointerCancel(e); };
+    this._onDblClick      = function (e) { self._handleDblClick(e); };
 
-    canvas.addEventListener('click', this._onClick);
-    canvas.addEventListener('dblclick', this._onDblClick);
-    canvas.addEventListener('mousemove', this._onMouseMove);
+    canvas.addEventListener('pointerdown',   this._onPointerDown);
+    canvas.addEventListener('pointermove',   this._onPointerMove);
+    canvas.addEventListener('pointerup',     this._onPointerUp);
+    canvas.addEventListener('pointercancel', this._onPointerCancel);
+    canvas.addEventListener('dblclick',      this._onDblClick);
   },
 
   _unbindEvents() {
     var canvas = this._context.renderer.domElement;
-    if (this._onClick) canvas.removeEventListener('click', this._onClick);
-    if (this._onDblClick) canvas.removeEventListener('dblclick', this._onDblClick);
-    if (this._onMouseMove) canvas.removeEventListener('mousemove', this._onMouseMove);
+    if (this._onPointerDown)   canvas.removeEventListener('pointerdown',   this._onPointerDown);
+    if (this._onPointerMove)   canvas.removeEventListener('pointermove',   this._onPointerMove);
+    if (this._onPointerUp)     canvas.removeEventListener('pointerup',     this._onPointerUp);
+    if (this._onPointerCancel) canvas.removeEventListener('pointercancel', this._onPointerCancel);
+    if (this._onDblClick)      canvas.removeEventListener('dblclick',      this._onDblClick);
+  },
+
+  _clientToWorld(e) {
+    var rect = this._context.renderer.domElement.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: rect.height - (e.clientY - rect.top)
+    };
   },
 
   _hitTest(e) {
@@ -108,6 +141,91 @@ Shell.register({
       }
     }
     return -1;
+  },
+
+  _handlePointerDown(e) {
+    if (e.button !== 0) return;
+    var rect = this._context.renderer.domElement.getBoundingClientRect();
+    this._pressX = e.clientX - rect.left;
+    this._pressY = e.clientY - rect.top;
+    this._pressIndex = this._hitTest(e);
+    this._isPressed = true;
+    try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
+    this._updateCursor();
+  },
+
+  _handlePointerUp(e) {
+    if (!this._isPressed) return;
+
+    var wasDragging  = this._isDragging;
+    var dragSource   = this._dragSourceIndex;
+    this._isPressed       = false;
+    this._isDragging      = false;
+    this._dragSourceIndex = -1;
+    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
+
+    if (e.button !== 0) {
+      this._pressIndex = -1;
+      this._updateCursor();
+      return;
+    }
+
+    if (wasDragging) {
+      if (this._drag && this._drag.phase === 'following') {
+        var target = this._hitTest(e);
+        if (target !== -1 && target !== dragSource && !this._nodes[target].active) {
+          this._startDrop(target);
+        } else {
+          this._startCancel();
+        }
+      } else {
+        // Released before the break completed — abort cleanly.
+        this._destroyDrag();
+      }
+    } else {
+      var rect = this._context.renderer.domElement.getBoundingClientRect();
+      var dx = (e.clientX - rect.left) - this._pressX;
+      var dy = (e.clientY - rect.top)  - this._pressY;
+      var t = this._dragThreshold;
+      if (dx * dx + dy * dy <= t * t) {
+        this._handleClick(e);
+      }
+    }
+
+    this._pressIndex = -1;
+    this._updateCursor();
+  },
+
+  _handlePointerCancel(e) {
+    this._isPressed       = false;
+    this._isDragging      = false;
+    this._dragSourceIndex = -1;
+    this._pressIndex      = -1;
+    this._destroyDrag();
+    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
+    this._updateCursor();
+  },
+
+  _isValidDropTarget(idx) {
+    if (idx === -1) return false;
+    if (idx === this._dragSourceIndex) return false;
+    return !this._nodes[idx].active;
+  },
+
+  _updateCursor() {
+    var canvas = this._context.renderer.domElement;
+    var cursor = '';
+    if (this._isDragging) {
+      cursor = 'grabbing';
+    } else if (this._isPressed
+        && this._pressIndex !== -1
+        && this._nodes[this._pressIndex]
+        && this._nodes[this._pressIndex].active) {
+      cursor = 'grabbing';
+    } else if (this._hoveredIndex !== -1) {
+      cursor = this._nodes[this._hoveredIndex].active ? 'grab' : 'pointer';
+    }
+    canvas.style.cursor = cursor;
   },
 
   _handleClick(e) {
@@ -129,23 +247,37 @@ Shell.register({
     }
   },
 
-  _handleMouseMove(e) {
-    var hit = this._hitTest(e);
-
-    // Non-head active nodes are not interactive
-    if (hit !== -1) {
-      var node = this._nodes[hit];
-      var head = this._sequence.length > 0 ? this._sequence[this._sequence.length - 1] : -1;
-      if (node.active && hit !== head) {
-        hit = -1;
+  _handlePointerMove(e) {
+    // Detect drag entry: pressed on an active node + moved past threshold
+    if (this._isPressed && !this._isDragging && this._pressIndex !== -1) {
+      var src = this._nodes[this._pressIndex];
+      if (src && src.active) {
+        var rect = this._context.renderer.domElement.getBoundingClientRect();
+        var dx = (e.clientX - rect.left) - this._pressX;
+        var dy = (e.clientY - rect.top)  - this._pressY;
+        var t = this._dragThreshold;
+        if (dx * dx + dy * dy > t * t) {
+          this._isDragging = true;
+          this._dragSourceIndex = this._pressIndex;
+          var w = this._clientToWorld(e);
+          this._initDrag(this._pressIndex, w.x, w.y);
+        }
       }
     }
 
+    if (this._isDragging) {
+      var w2 = this._clientToWorld(e);
+      this._updateDragCursor(w2.x, w2.y);
+    }
+
+    var hit = this._hitTest(e);
+    if (this._isDragging && hit !== -1 && !this._isValidDropTarget(hit)) {
+      hit = -1;
+    }
     if (hit !== this._hoveredIndex) {
       this._hoveredIndex = hit;
-      var canvas = this._context.renderer.domElement;
-      canvas.style.cursor = hit !== -1 ? 'pointer' : '';
     }
+    this._updateCursor();
   },
 
   _handleDblClick(e) {
@@ -203,6 +335,416 @@ Shell.register({
 
     this._updateHeadRing();
     this._sendSequence();
+  },
+
+  _replaceNodeInSequence(sourceIdx, targetIdx) {
+    var seqPos = this._sequence.indexOf(sourceIdx);
+    if (seqPos === -1) return;
+
+    this._sequence[seqPos] = targetIdx;
+
+    var src = this._nodes[sourceIdx];
+    var tgt = this._nodes[targetIdx];
+    src.active = false;
+    src.targetColor.setHex(this._inactiveColor);
+    src.labelTargetColor.setHex(0xaaaaaa);
+    tgt.active = true;
+    tgt.targetColor.setHex(this._activeColor);
+    tgt.labelTargetColor.setHex(0x111111);
+    // Spring pops are driven by ball-animation milestones (source on detach,
+    // target on absorb arrival).
+
+    for (var i = 0; i < this._edges.length; i++) {
+      var edge = this._edges[i];
+      var changed = false;
+      if (edge.fromIndex === sourceIdx) { edge.fromIndex = targetIdx; changed = true; }
+      if (edge.toIndex   === sourceIdx) { edge.toIndex   = targetIdx; changed = true; }
+      if (changed) {
+        var a = this._nodes[edge.fromIndex];
+        var b = this._nodes[edge.toIndex];
+        var pts = [
+          new THREE.Vector3(a.x, a.y, 0.05),
+          new THREE.Vector3(b.x, b.y, 0.05)
+        ];
+        edge.line.geometry.dispose();
+        edge.line.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+      }
+    }
+
+    this._updateHeadRing();
+    this._sendSequence();
+  },
+
+  // ==================================================================
+  // Chewing-gum drag mechanic
+  //
+  // Phases:
+  //   stretching — source's perimeter vertices deform into a tongue;
+  //                apex distance follows cursor sub-linearly (a = r + (d−r)^p).
+  //   breaking   — strain (d − a) exceeded threshold; tongue retracts to
+  //                source's perimeter, bud emerges at cursor, strand forms.
+  //   following  — source is a clean circle; bud follows cursor; strand stretches.
+  //   dropping   — released on valid target; bud animates to target center
+  //                and shrinks into it, strand follows.
+  //   cancelling — released elsewhere; bud retracts back to source.
+  // ==================================================================
+
+  _initDrag(sourceIdx, worldX, worldY) {
+    if (this._drag) this._destroyDrag();
+
+    var srcNode = this._nodes[sourceIdx];
+    var radius  = srcNode.ring === 0 ? this._nodeRadiusInner : this._nodeRadius;
+
+    // Cache source's original vertex positions for restoration.
+    var sourceOrigPositions = new Float32Array(
+      srcNode.mesh.geometry.attributes.position.array
+    );
+
+    // Bud mesh — invisible until the break fires.
+    var budGeo  = new THREE.CircleGeometry(radius, 32);
+    var budMat  = new THREE.MeshBasicMaterial({ color: this._activeColor });
+    var budMesh = new THREE.Mesh(budGeo, budMat);
+    budMesh.position.set(worldX, worldY, 0.5);
+    budMesh.scale.set(0.001, 0.001, 1);
+    budMesh.visible = false;
+    this._group.add(budMesh);
+
+    // Strand mesh — tapered strip, also invisible until needed.
+    var N = this._strandSegments;
+    var strandPositions = new Float32Array((N + 1) * 2 * 3);
+    var strandIndices   = [];
+    for (var si = 0; si < N; si++) {
+      strandIndices.push(si * 2,     si * 2 + 1, (si + 1) * 2);
+      strandIndices.push((si + 1) * 2, si * 2 + 1, (si + 1) * 2 + 1);
+    }
+    var strandGeo = new THREE.BufferGeometry();
+    strandGeo.setAttribute('position', new THREE.BufferAttribute(strandPositions, 3));
+    strandGeo.setIndex(strandIndices);
+    var strandMat = new THREE.MeshBasicMaterial({
+      color: this._activeColor,
+      side:  THREE.DoubleSide
+    });
+    var strandMesh = new THREE.Mesh(strandGeo, strandMat);
+    strandMesh.visible = false;
+    this._group.add(strandMesh);
+
+    this._drag = {
+      sourceIdx:        sourceIdx,
+      phase:            'stretching',
+      cursorX:          worldX,
+      cursorY:          worldY,
+      sourceRadius:     radius,
+      sourceApex:       radius,
+      sourceOrigPos:    sourceOrigPositions,
+      budMesh:          budMesh,
+      budScale:         0,
+      strandMesh:       strandMesh,
+      strandPositions:  strandPositions,
+      elapsed:          0,
+      duration:         0,
+      targetIdx:        -1,
+      targetPopped:     false
+    };
+  },
+
+  _updateDragCursor(worldX, worldY) {
+    var d = this._drag;
+    if (!d) return;
+    // Allow cursor to track during all active drag phases, including the
+    // break — otherwise the bud freezes for 280ms while phase B animates,
+    // then teleports to the new cursor when phase C kicks in.
+    if (d.phase !== 'stretching' && d.phase !== 'following' && d.phase !== 'breaking') return;
+    d.cursorX = worldX;
+    d.cursorY = worldY;
+  },
+
+  _startDrop(targetIdx) {
+    var d = this._drag;
+    if (!d) return;
+    this._replaceNodeInSequence(d.sourceIdx, targetIdx);
+    var tgt = this._nodes[targetIdx];
+    d.phase          = 'dropping';
+    d.dropFromX      = d.budMesh.position.x;
+    d.dropFromY      = d.budMesh.position.y;
+    d.dropToX        = tgt.x;
+    d.dropToY        = tgt.y;
+    d.targetIdx      = targetIdx;
+    d.targetPopped   = false;
+    d.elapsed        = 0;
+    d.duration       = this._dropDuration;
+  },
+
+  _startCancel() {
+    var d = this._drag;
+    if (!d) return;
+    d.phase        = 'cancelling';
+    d.cancelFromX  = d.budMesh.position.x;
+    d.cancelFromY  = d.budMesh.position.y;
+    d.elapsed      = 0;
+    d.duration     = this._cancelDuration;
+  },
+
+  _destroyDrag() {
+    if (!this._drag) return;
+    var d = this._drag;
+    this._restoreSourceGeometry();
+    this._group.remove(d.budMesh);
+    d.budMesh.geometry.dispose();
+    d.budMesh.material.dispose();
+    this._group.remove(d.strandMesh);
+    d.strandMesh.geometry.dispose();
+    d.strandMesh.material.dispose();
+    this._drag = null;
+  },
+
+  _deformSourceGeometry(dirX, dirY, apex) {
+    var d = this._drag;
+    if (!d) return;
+    var src = this._nodes[d.sourceIdx];
+    var positions = src.mesh.geometry.attributes.position.array;
+    var orig = d.sourceOrigPos;
+    var r = d.sourceRadius;
+
+    if (apex <= r + 0.01) {
+      positions.set(orig);
+      src.mesh.geometry.attributes.position.needsUpdate = true;
+      return;
+    }
+
+    var phi    = Math.atan2(dirY, dirX);
+    var cosPhi = Math.cos(phi);
+    var sinPhi = Math.sin(phi);
+
+    var nVerts = positions.length / 3;
+    for (var i = 1; i < nVerts; i++) {  // skip center vertex (index 0)
+      var ox = orig[i * 3];
+      var oy = orig[i * 3 + 1];
+      var theta = Math.atan2(oy, ox);
+      var delta = theta - phi;
+      while (delta >  Math.PI) delta -= 2 * Math.PI;
+      while (delta < -Math.PI) delta += 2 * Math.PI;
+
+      if (Math.abs(delta) > Math.PI / 2) {
+        positions[i * 3]     = ox;
+        positions[i * 3 + 1] = oy;
+      } else {
+        var alpha   = (delta + Math.PI / 2) / Math.PI;
+        var forward = apex * Math.sin(Math.PI * alpha);
+        var perp    = -r * Math.cos(Math.PI * alpha);
+        positions[i * 3]     = forward * cosPhi - perp * sinPhi;
+        positions[i * 3 + 1] = forward * sinPhi + perp * cosPhi;
+      }
+    }
+    src.mesh.geometry.attributes.position.needsUpdate = true;
+  },
+
+  _restoreSourceGeometry() {
+    var d = this._drag;
+    if (!d || !d.sourceOrigPos) return;
+    var src = this._nodes[d.sourceIdx];
+    if (!src) return;
+    var positions = src.mesh.geometry.attributes.position.array;
+    positions.set(d.sourceOrigPos);
+    src.mesh.geometry.attributes.position.needsUpdate = true;
+  },
+
+  _updateStrandGeometry(apexX, apexY, budX, budY, budRadius) {
+    var d = this._drag;
+    if (!d) return;
+    var positions = d.strandPositions;
+    var N = this._strandSegments;
+
+    var dx = budX - apexX;
+    var dy = budY - apexY;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 0.001 || budRadius < 0.5) {
+      d.strandMesh.visible = false;
+      return;
+    }
+    d.strandMesh.visible = true;
+
+    var ux = dx / dist;
+    var uy = dy / dist;
+    var px = -uy;
+    var py =  ux;
+
+    // Strand connects to bud's source-facing perimeter.
+    var budConnectX = budX - ux * budRadius;
+    var budConnectY = budY - uy * budRadius;
+
+    var stretchFactor = Math.max(0.30, 1 - dist / 140);
+    // Strand renders over node fills and head rings, but under labels (0.20)
+    // and the bud (0.50). Reads as "in transit, in front of the chain."
+    var z = 0.18;
+
+    for (var i = 0; i <= N; i++) {
+      var u  = i / N;
+      var cx = apexX + (budConnectX - apexX) * u;
+      var cy = apexY + (budConnectY - apexY) * u;
+      var bell = 1 - 0.35 * Math.sin(Math.PI * u);
+      var w  = this._strandBaseWidth * 0.5 * stretchFactor * bell;
+
+      var topIdx = (i * 2) * 3;
+      var botIdx = (i * 2 + 1) * 3;
+      positions[topIdx]     = cx + px * w;
+      positions[topIdx + 1] = cy + py * w;
+      positions[topIdx + 2] = z;
+      positions[botIdx]     = cx - px * w;
+      positions[botIdx + 1] = cy - py * w;
+      positions[botIdx + 2] = z;
+    }
+    d.strandMesh.geometry.attributes.position.needsUpdate = true;
+  },
+
+  _updateDrag(delta) {
+    var d = this._drag;
+    if (!d) return;
+    d.elapsed += delta * 1000;
+    var src = this._nodes[d.sourceIdx];
+    if (!src) return;
+
+    if (d.phase === 'stretching') {
+      var dx = d.cursorX - src.x;
+      var dy = d.cursorY - src.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var apex = d.sourceRadius;
+      if (dist > d.sourceRadius) {
+        apex = d.sourceRadius + Math.pow(dist - d.sourceRadius, this._pExponent);
+      }
+      d.sourceApex = apex;
+
+      var dirX = dist > 0.001 ? dx / dist : 1;
+      var dirY = dist > 0.001 ? dy / dist : 0;
+      this._deformSourceGeometry(dirX, dirY, apex);
+
+      d.budMesh.visible    = false;
+      d.strandMesh.visible = false;
+
+      var strain = dist - apex;
+      if (strain > this._strainThreshold) {
+        d.phase            = 'breaking';
+        d.breakApexStart   = apex;
+        // Lock the tongue's retraction direction at break time. The source
+        // physically "snaps" along the pull axis it was being stretched on,
+        // regardless of where the cursor wanders during the 280ms animation.
+        d.breakDirX        = dirX;
+        d.breakDirY        = dirY;
+        d.elapsed          = 0;
+        d.duration         = this._breakDuration;
+      }
+    } else if (d.phase === 'breaking') {
+      var bt = Math.min(1, d.elapsed / d.duration);
+      var be = 1 - (1 - bt) * (1 - bt);  // easeOutQuad
+
+      // Source's tongue retracts in the locked direction.
+      d.sourceApex = d.breakApexStart + (d.sourceRadius - d.breakApexStart) * be;
+      this._deformSourceGeometry(d.breakDirX, d.breakDirY, d.sourceApex);
+
+      // Bud is "in the user's hand" — it tracks the live cursor.
+      d.budScale = be;
+      d.budMesh.position.set(d.cursorX, d.cursorY, 0.5);
+      d.budMesh.scale.set(d.budScale, d.budScale, 1);
+      d.budMesh.visible = d.budScale > 0.05;
+
+      if (d.budScale > 0.05) {
+        var apexX = src.x + d.breakDirX * d.sourceApex;
+        var apexY = src.y + d.breakDirY * d.sourceApex;
+        this._updateStrandGeometry(apexX, apexY, d.cursorX, d.cursorY,
+                                   d.sourceRadius * d.budScale);
+      } else {
+        d.strandMesh.visible = false;
+      }
+
+      if (bt >= 1) {
+        d.phase = 'following';
+        this._restoreSourceGeometry();
+      }
+    } else if (d.phase === 'following') {
+      d.budScale = 1;
+      d.budMesh.position.set(d.cursorX, d.cursorY, 0.5);
+      d.budMesh.scale.set(1, 1, 1);
+      d.budMesh.visible = true;
+
+      var fdx = d.cursorX - src.x;
+      var fdy = d.cursorY - src.y;
+      var fdist = Math.sqrt(fdx * fdx + fdy * fdy);
+      if (fdist > d.sourceRadius) {
+        var fdirX = fdx / fdist;
+        var fdirY = fdy / fdist;
+        var fApexX = src.x + fdirX * d.sourceRadius;
+        var fApexY = src.y + fdirY * d.sourceRadius;
+        this._updateStrandGeometry(fApexX, fApexY, d.cursorX, d.cursorY, d.sourceRadius);
+      } else {
+        d.strandMesh.visible = false;
+      }
+    } else if (d.phase === 'dropping') {
+      var dt = Math.min(1, d.elapsed / d.duration);
+      var de = 1 - (1 - dt) * (1 - dt);  // easeOutQuad — fast zip, soft landing
+      var dx2 = d.dropFromX + (d.dropToX - d.dropFromX) * de;
+      var dy2 = d.dropFromY + (d.dropToY - d.dropFromY) * de;
+
+      d.budScale = dt < 0.6 ? 1 : Math.max(0, 1 - (dt - 0.6) / 0.4);
+      d.budMesh.position.set(dx2, dy2, 0.5);
+      d.budMesh.scale.set(d.budScale, d.budScale, 1);
+      d.budMesh.visible = d.budScale > 0.05;
+
+      if (d.budScale > 0.05) {
+        var ddx = dx2 - src.x;
+        var ddy = dy2 - src.y;
+        var ddist = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (ddist > d.sourceRadius) {
+          var ddirX = ddx / ddist;
+          var ddirY = ddy / ddist;
+          var dApexX = src.x + ddirX * d.sourceRadius;
+          var dApexY = src.y + ddirY * d.sourceRadius;
+          this._updateStrandGeometry(dApexX, dApexY, dx2, dy2,
+                                     d.sourceRadius * d.budScale);
+        } else {
+          d.strandMesh.visible = false;
+        }
+      } else {
+        d.strandMesh.visible = false;
+      }
+
+      if (dt >= 0.7 && !d.targetPopped) {
+        d.targetPopped = true;
+        this._popNode(d.targetIdx);
+      }
+      if (dt >= 1) this._destroyDrag();
+    } else if (d.phase === 'cancelling') {
+      var ct = Math.min(1, d.elapsed / d.duration);
+      var ce = 1 - (1 - ct) * (1 - ct);  // easeOutQuad
+      var cx2 = d.cancelFromX + (src.x - d.cancelFromX) * ce;
+      var cy2 = d.cancelFromY + (src.y - d.cancelFromY) * ce;
+
+      d.budScale = Math.max(0, 1 - ce);
+      d.budMesh.position.set(cx2, cy2, 0.5);
+      d.budMesh.scale.set(d.budScale, d.budScale, 1);
+      d.budMesh.visible = d.budScale > 0.05;
+
+      if (d.budScale > 0.05) {
+        var cdx = cx2 - src.x;
+        var cdy = cy2 - src.y;
+        var cdist = Math.sqrt(cdx * cdx + cdy * cdy);
+        if (cdist > d.sourceRadius) {
+          var cdirX = cdx / cdist;
+          var cdirY = cdy / cdist;
+          var cApexX = src.x + cdirX * d.sourceRadius;
+          var cApexY = src.y + cdirY * d.sourceRadius;
+          this._updateStrandGeometry(cApexX, cApexY, cx2, cy2,
+                                     d.sourceRadius * d.budScale);
+        } else {
+          d.strandMesh.visible = false;
+        }
+      } else {
+        d.strandMesh.visible = false;
+      }
+
+      if (ct >= 1) {
+        this._popNode(d.sourceIdx);
+        this._destroyDrag();
+      }
+    }
   },
 
   _clearChain() {
@@ -436,6 +978,8 @@ Shell.register({
       this._restoreChain();
     }
 
+    this._updateDrag(delta);
+
     var stiffness = 300;
     var damping   = 12;
     var colorLerp = Math.min(1, delta * 20);
@@ -470,6 +1014,12 @@ Shell.register({
       this._dimmedColor.set(0xffffff).lerp(this._bgColor, 1 - dim);
       this._headRing.material.color.lerp(this._dimmedColor, colorLerp);
     }
+
+    if (this._drag) {
+      this._dimmedColor.set(this._activeColor).lerp(this._bgColor, 1 - dim);
+      if (this._drag.budMesh)    this._drag.budMesh.material.color.lerp(this._dimmedColor, colorLerp);
+      if (this._drag.strandMesh) this._drag.strandMesh.material.color.lerp(this._dimmedColor, colorLerp);
+    }
   },
 
   pause() {},
@@ -478,5 +1028,6 @@ Shell.register({
   destroy() {
     this._unbindEvents();
     if (this._unsubscribeScale) this._unsubscribeScale();
+    this._destroyDrag();
   },
 });

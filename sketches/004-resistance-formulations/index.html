@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Resistance formulations — sketch 004</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: #0a0a0a; color: #ccc;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; color: #eee; font-weight: 600; }
+  .intro {
+    font-size: 13px; color: #888; line-height: 1.6;
+    margin: 0 0 8px; max-width: 940px;
+  }
+  .legend {
+    font-size: 12px; color: #777; line-height: 1.6;
+    margin: 0 0 24px; max-width: 940px;
+  }
+  .legend span { color: #ddd; }
+  .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    vertical-align: middle; margin-right: 4px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    max-width: 1180px;
+  }
+  .panel { background: #161616; border-radius: 8px; padding: 16px; }
+  .panel h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: #eee; }
+  .panel .desc { font-size: 12px; color: #888; line-height: 1.5; margin: 0 0 12px; }
+  .panel .formula {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px; color: #9cf;
+    background: rgba(255,255,255,0.04);
+    padding: 4px 8px; border-radius: 4px;
+    margin: 0 0 12px; display: inline-block;
+  }
+  canvas {
+    display: block; background: #0a0a0a; border-radius: 4px;
+    cursor: crosshair; width: 100%; height: auto;
+  }
+  .controls {
+    margin-top: 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .controls label {
+    font-size: 11px; color: #999;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .controls label > span:first-child {
+    width: 80px; text-align: right; color: #aaa;
+  }
+  .controls input[type="range"] { flex: 1; accent-color: #ffb84d; }
+  .controls .val {
+    font-variant-numeric: tabular-nums;
+    width: 56px; text-align: right; color: #ffd84d;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .no-params { font-size: 11px; color: #555; font-style: italic; margin-top: 12px; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>Resistance formulations</h1>
+<p class="intro">
+  Four ways to encode "the source pushes back" into the stretch. In each panel, drag
+  outward from the source and watch how the apex of the tongue lags behind your cursor.
+  The gap between cursor and apex is what reads as <em>resistance</em>. Sliders tune
+  each formulation in real time. Same break threshold (90&nbsp;px) across all four —
+  what differs is how the apex gets there.
+</p>
+<p class="legend">
+  <span class="dot" style="background:#ffd84d"></span>cursor &nbsp;·&nbsp;
+  <span class="dot" style="background:#ff7850"></span>apex tip &nbsp;·&nbsp;
+  dashed orange line = strain (cursor − apex) &nbsp;·&nbsp;
+  live readout at bottom of each canvas
+</p>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>1 · Linear (reference)</h2>
+    <p class="desc">No resistance. Apex follows cursor 1:1. Included as a baseline so you can feel the difference.</p>
+    <div class="formula">a(d) = clamp(d, r, T)</div>
+    <canvas id="c1" width="500" height="300"></canvas>
+    <p class="no-params">no parameters</p>
+  </div>
+
+  <div class="panel">
+    <h2>2 · Sub-linear power</h2>
+    <p class="desc">Apex extends with diminishing returns as you pull. Smaller exponent = stronger resistance early.</p>
+    <div class="formula">a(d) = r + (d − r)<sup>p</sup></div>
+    <canvas id="c2" width="500" height="300"></canvas>
+    <div class="controls">
+      <label><span>p</span><input type="range" id="p-slider" min="0.2" max="1.0" value="0.55" step="0.01"><span class="val" id="p-val">0.55</span></label>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>3 · Asymptotic saturation</h2>
+    <p class="desc">Apex approaches a hard ceiling (a_max). Past that, pulling does nothing visually — the material is "maxed out."</p>
+    <div class="formula">a(d) = r + (a_max − r)·(1 − e<sup>−(d − r)/k</sup>)</div>
+    <canvas id="c3" width="500" height="300"></canvas>
+    <div class="controls">
+      <label><span>a_max</span><input type="range" id="amax-slider" min="40" max="120" value="62" step="1"><span class="val" id="amax-val">62</span></label>
+      <label><span>k</span><input type="range" id="k-slider" min="8" max="80" value="22" step="1"><span class="val" id="k-val">22</span></label>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>4 · Spring-damper (dynamic)</h2>
+    <p class="desc">Apex chases the cursor through spring physics. Resistance is felt as lag in <em>time</em>, not just in <em>distance</em>. Move fast → big lag; move slow → catches up.</p>
+    <div class="formula">v += k·(target − a)·dt − c·v·dt &nbsp;;&nbsp; a += v·dt</div>
+    <canvas id="c4" width="500" height="300"></canvas>
+    <div class="controls">
+      <label><span>stiffness</span><input type="range" id="stiff-slider" min="20" max="500" value="100" step="5"><span class="val" id="stiff-val">100</span></label>
+      <label><span>damping</span><input type="range" id="damp-slider" min="3" max="40" value="14" step="0.5"><span class="val" id="damp-val">14.0</span></label>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// =======================================================================
+// Constants
+// =======================================================================
+const SRC_X = 130, SRC_Y = 140;
+const TGT_X = 370, TGT_Y = 140;
+const RADIUS = 28;
+const BREAK_THRESHOLD = 90;
+const BREAK_DURATION = 280;
+const DROP_DURATION = 480;
+const STRAND_BASE_WIDTH = 8;
+
+// =======================================================================
+// Math
+// =======================================================================
+function deformedSourceVerts(srcX, srcY, peakX, peakY, r, peakOverride) {
+  const dx = peakX - srcX;
+  const dy = peakY - srcY;
+  const rawDist = Math.hypot(dx, dy);
+  const peakDistRaw = peakOverride !== undefined ? peakOverride : rawDist;
+  const peakDist = Math.max(r, peakDistRaw);
+  const phi = rawDist > 0.001 ? Math.atan2(dy, dx) : 0;
+  const cosPhi = Math.cos(phi);
+  const sinPhi = Math.sin(phi);
+
+  const N = 64;
+  const verts = [];
+  for (let i = 0; i < N; i++) {
+    const theta = (i / N) * Math.PI * 2;
+    let delta = theta - phi;
+    while (delta >  Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+
+    let lx, ly;
+    if (Math.abs(delta) > Math.PI / 2) {
+      lx = r * Math.cos(theta);
+      ly = r * Math.sin(theta);
+    } else {
+      const alpha = (delta + Math.PI / 2) / Math.PI;
+      const forward = peakDist * Math.sin(Math.PI * alpha);
+      const perp    = -r * Math.cos(Math.PI * alpha);
+      lx = forward * cosPhi - perp * sinPhi;
+      ly = forward * sinPhi + perp * cosPhi;
+    }
+    verts.push([srcX + lx, srcY + ly]);
+  }
+  return verts;
+}
+
+const easeOutQuad   = t => 1 - (1 - t) * (1 - t);
+const easeInOutQuad = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+// =======================================================================
+// Resistance strategies — each computes apex from cursor distance
+// =======================================================================
+const strategies = {
+  linear: {
+    isDynamic: false,
+    compute(d) {
+      return Math.max(RADIUS, Math.min(d, BREAK_THRESHOLD));
+    },
+  },
+  power: {
+    isDynamic: false,
+    p: 0.55,
+    compute(d) {
+      if (d <= RADIUS) return RADIUS;
+      const target = RADIUS + Math.pow(d - RADIUS, this.p);
+      return Math.max(RADIUS, Math.min(target, BREAK_THRESHOLD));
+    },
+  },
+  asymptotic: {
+    isDynamic: false,
+    aMax: 62,
+    k: 22,
+    compute(d) {
+      if (d <= RADIUS) return RADIUS;
+      const target = RADIUS + (this.aMax - RADIUS) * (1 - Math.exp(-(d - RADIUS) / this.k));
+      return Math.max(RADIUS, Math.min(target, BREAK_THRESHOLD));
+    },
+  },
+  spring: {
+    isDynamic: true,
+    stiffness: 100,
+    damping: 14,
+    step(d, prev, vel, dt) {
+      const target = Math.max(RADIUS, Math.min(d, BREAK_THRESHOLD));
+      const force = this.stiffness * (target - prev) - this.damping * vel;
+      const newVel = vel + force * dt;
+      const newApex = Math.max(RADIUS, prev + newVel * dt);
+      return { apex: newApex, velocity: newVel };
+    },
+  },
+};
+
+// =======================================================================
+// Drawing
+// =======================================================================
+function fillPolygon(ctx, verts, fill) {
+  ctx.beginPath();
+  verts.forEach(([x, y], i) =>
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y));
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+function fillCircle(ctx, x, y, r, fill) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill; ctx.fill();
+}
+function strokeCircle(ctx, x, y, r, stroke, w = 1) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = stroke; ctx.lineWidth = w; ctx.stroke();
+}
+function clearBg(ctx, canvas) {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+function drawCursor(ctx, x, y) {
+  ctx.fillStyle = '#ffd84d';
+  ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+}
+function drawLabel(ctx, text, x, y, color = '#888') {
+  ctx.fillStyle = color;
+  ctx.font = '11px ui-monospace, Menlo, monospace';
+  ctx.fillText(text, x, y);
+}
+
+function renderTongue(ctx, sx, sy, dirX, dirY, peakDist, r, color) {
+  const apexX = sx + dirX * peakDist;
+  const apexY = sy + dirY * peakDist;
+  const verts = deformedSourceVerts(sx, sy, apexX, apexY, r, peakDist);
+  fillPolygon(ctx, verts, color);
+}
+
+function renderStrand(ctx, apexX, apexY, budX, budY, budRadius, color) {
+  const dx = budX - apexX;
+  const dy = budY - apexY;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 0.001 || budRadius < 0.5) return;
+
+  const ux = dx / dist, uy = dy / dist;
+  const px = -uy, py = ux;
+  const budConnectX = budX - ux * budRadius;
+  const budConnectY = budY - uy * budRadius;
+
+  const stretchFactor = Math.max(0.30, 1 - dist / 140);
+  const N = 16;
+  const halfWidthAt = u => {
+    const bell = 1 - 0.35 * Math.sin(Math.PI * u);
+    return STRAND_BASE_WIDTH * 0.5 * stretchFactor * bell;
+  };
+
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const u = i / N;
+    const cx = apexX + (budConnectX - apexX) * u;
+    const cy = apexY + (budConnectY - apexY) * u;
+    const w  = halfWidthAt(u);
+    if (i === 0) ctx.moveTo(cx + px * w, cy + py * w);
+    else         ctx.lineTo(cx + px * w, cy + py * w);
+  }
+  for (let i = N; i >= 0; i--) {
+    const u = i / N;
+    const cx = apexX + (budConnectX - apexX) * u;
+    const cy = apexY + (budConnectY - apexY) * u;
+    const w  = halfWidthAt(u);
+    ctx.lineTo(cx - px * w, cy - py * w);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+function renderBud(ctx, x, y, scale, r, color) {
+  if (scale < 0.01) return;
+  fillCircle(ctx, x, y, r * scale, color);
+}
+
+// =======================================================================
+// Panel factory — each panel uses a different resistance strategy
+// =======================================================================
+function setupPanel(canvasId, strategyKey) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const strategy = strategies[strategyKey];
+
+  const state = {
+    isDragging: false,
+    cursorX: 0,
+    cursorY: 0,
+    phase: 'A',
+    breakStart: 0,
+    breakApexStart: RADIUS,
+    dropStart: 0,
+    dropFromX: 0, dropFromY: 0,
+    budScale: 0,
+    sourceApex: RADIUS,
+    apexVelocity: 0,
+    targetActive: false,
+    lastFrame: performance.now(),
+  };
+
+  function resetToClean() {
+    state.isDragging = false;
+    state.phase = 'A';
+    state.budScale = 0;
+    state.sourceApex = RADIUS;
+    state.apexVelocity = 0;
+    state.targetActive = false;
+  }
+
+  function getMousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top)  * (canvas.height / rect.height),
+    };
+  }
+
+  canvas.addEventListener('mousedown', e => {
+    if (state.phase === 'drop') return;
+    if (state.phase === 'done') resetToClean();
+    const { x, y } = getMousePos(e);
+    const distSrc = Math.hypot(x - SRC_X, y - SRC_Y);
+    if (distSrc <= RADIUS && !state.isDragging) {
+      state.isDragging = true;
+      state.cursorX = x; state.cursorY = y;
+      state.phase = 'A';
+      state.sourceApex = RADIUS;
+      state.apexVelocity = 0;
+      state.budScale = 0;
+    }
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!state.isDragging) return;
+    const { x, y } = getMousePos(e);
+    state.cursorX = x; state.cursorY = y;
+  });
+
+  canvas.addEventListener('mouseup', e => {
+    if (!state.isDragging) return;
+    state.isDragging = false;
+    if (state.phase === 'C') {
+      const { x, y } = getMousePos(e);
+      const distTgt = Math.hypot(x - TGT_X, y - TGT_Y);
+      if (distTgt <= RADIUS) {
+        state.phase = 'drop';
+        state.dropStart = performance.now();
+        state.dropFromX = state.cursorX;
+        state.dropFromY = state.cursorY;
+        return;
+      }
+    }
+    resetToClean();
+  });
+
+  canvas.addEventListener('click', () => {
+    if (state.phase === 'done') resetToClean();
+  });
+
+  function update() {
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - state.lastFrame) / 1000);
+    state.lastFrame = now;
+
+    const dist = Math.hypot(state.cursorX - SRC_X, state.cursorY - SRC_Y);
+
+    if (state.phase === 'A') {
+      if (state.isDragging) {
+        if (strategy.isDynamic) {
+          const r = strategy.step(dist, state.sourceApex, state.apexVelocity, dt);
+          state.sourceApex = r.apex;
+          state.apexVelocity = r.velocity;
+        } else {
+          state.sourceApex = strategy.compute(dist);
+          state.apexVelocity = 0;
+        }
+        if (dist > BREAK_THRESHOLD) {
+          state.phase = 'B';
+          state.breakStart = now;
+          state.breakApexStart = state.sourceApex;
+        }
+      } else {
+        state.sourceApex = RADIUS;
+        state.apexVelocity = 0;
+      }
+    } else if (state.phase === 'B') {
+      const t = Math.min(1, (now - state.breakStart) / BREAK_DURATION);
+      const e = easeOutQuad(t);
+      state.sourceApex = state.breakApexStart + (RADIUS - state.breakApexStart) * e;
+      state.budScale = e;
+      if (t >= 1) state.phase = 'C';
+    } else if (state.phase === 'C') {
+      state.sourceApex = RADIUS;
+      state.budScale = 1;
+    } else if (state.phase === 'drop') {
+      const t = Math.min(1, (now - state.dropStart) / DROP_DURATION);
+      const e = easeInOutQuad(t);
+      state.cursorX = state.dropFromX + (TGT_X - state.dropFromX) * e;
+      state.cursorY = state.dropFromY + (TGT_Y - state.dropFromY) * e;
+      state.budScale = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3;
+      if (t >= 0.6 && !state.targetActive) state.targetActive = true;
+      if (t >= 1) state.phase = 'done';
+    }
+  }
+
+  function render() {
+    clearBg(ctx, canvas);
+    update();
+
+    strokeCircle(ctx, SRC_X, SRC_Y, BREAK_THRESHOLD, 'rgba(255, 120, 80, 0.25)');
+    strokeCircle(ctx, SRC_X, SRC_Y, RADIUS, 'rgba(255, 200, 77, 0.15)');
+
+    const isOverTarget = state.isDragging && state.phase === 'C' &&
+      Math.hypot(state.cursorX - TGT_X, state.cursorY - TGT_Y) <= RADIUS;
+    const tgtFill = state.targetActive ? '#ffffff' :
+                    isOverTarget ? '#5a5a5a' : '#3a3a3a';
+    fillCircle(ctx, TGT_X, TGT_Y, RADIUS, tgtFill);
+    strokeCircle(ctx, TGT_X, TGT_Y, RADIUS,
+      isOverTarget ? 'rgba(255,255,255,0.45)' : 'rgba(255,255,255,0.18)');
+
+    const sourceColor = state.phase === 'done' ? '#3a3a3a' : '#ffffff';
+    if (state.phase === 'A' || state.phase === 'B') {
+      const dx = state.cursorX - SRC_X;
+      const dy = state.cursorY - SRC_Y;
+      const d = Math.hypot(dx, dy);
+      const dirX = d > 0.001 ? dx / d : 1;
+      const dirY = d > 0.001 ? dy / d : 0;
+      renderTongue(ctx, SRC_X, SRC_Y, dirX, dirY, state.sourceApex, RADIUS, sourceColor);
+    } else {
+      fillCircle(ctx, SRC_X, SRC_Y, RADIUS, sourceColor);
+    }
+
+    // Strain visualization (orange dashed line + apex tip marker)
+    if (state.isDragging && (state.phase === 'A' || state.phase === 'B')) {
+      const dx = state.cursorX - SRC_X;
+      const dy = state.cursorY - SRC_Y;
+      const d = Math.hypot(dx, dy);
+      if (d > state.sourceApex + 2 && d > 0.001) {
+        const dirX = dx / d;
+        const dirY = dy / d;
+        const apexX = SRC_X + dirX * state.sourceApex;
+        const apexY = SRC_Y + dirY * state.sourceApex;
+        ctx.strokeStyle = 'rgba(255, 120, 80, 0.55)';
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(apexX, apexY);
+        ctx.lineTo(state.cursorX, state.cursorY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#ff7850';
+        ctx.beginPath(); ctx.arc(apexX, apexY, 3.5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    if (state.budScale > 0.05 && state.phase !== 'done') {
+      const dxB = state.cursorX - SRC_X;
+      const dyB = state.cursorY - SRC_Y;
+      const distB = Math.hypot(dxB, dyB);
+      if (distB > 0.001) {
+        const apexX = SRC_X + (dxB / distB) * state.sourceApex;
+        const apexY = SRC_Y + (dyB / distB) * state.sourceApex;
+        renderStrand(ctx, apexX, apexY, state.cursorX, state.cursorY, RADIUS * state.budScale, '#ffffff');
+      }
+      renderBud(ctx, state.cursorX, state.cursorY, state.budScale, RADIUS, '#ffffff');
+    }
+
+    if (state.isDragging) drawCursor(ctx, state.cursorX, state.cursorY);
+
+    // Live readout
+    if (state.isDragging && (state.phase === 'A' || state.phase === 'B')) {
+      const d = Math.hypot(state.cursorX - SRC_X, state.cursorY - SRC_Y);
+      const gap = Math.max(0, d - state.sourceApex);
+      drawLabel(ctx,
+        `d=${d.toFixed(0).padStart(3)}  apex=${state.sourceApex.toFixed(0).padStart(3)}  strain=${gap.toFixed(0).padStart(3)}`,
+        16, canvas.height - 12, '#999');
+    } else if (state.phase === 'done') {
+      drawLabel(ctx, 'done — click to reset', 16, canvas.height - 12, '#777');
+    } else if (state.phase === 'C') {
+      drawLabel(ctx, 'release on target to drop', 16, canvas.height - 12, '#9c9');
+    } else {
+      drawLabel(ctx, 'press and drag from source', 16, canvas.height - 12, '#666');
+    }
+  }
+
+  function loop() { render(); requestAnimationFrame(loop); }
+  loop();
+}
+
+// =======================================================================
+// Initialize panels
+// =======================================================================
+setupPanel('c1', 'linear');
+setupPanel('c2', 'power');
+setupPanel('c3', 'asymptotic');
+setupPanel('c4', 'spring');
+
+// Slider wiring
+const wire = (sliderId, valId, key, prop, fmt = v => v.toFixed(2)) => {
+  const s = document.getElementById(sliderId);
+  const v = document.getElementById(valId);
+  s.addEventListener('input', () => {
+    strategies[key][prop] = parseFloat(s.value);
+    v.textContent = fmt(strategies[key][prop]);
+  });
+};
+wire('p-slider',     'p-val',     'power',      'p',         v => v.toFixed(2));
+wire('amax-slider',  'amax-val',  'asymptotic', 'aMax',      v => v.toFixed(0));
+wire('k-slider',     'k-val',     'asymptotic', 'k',         v => v.toFixed(0));
+wire('stiff-slider', 'stiff-val', 'spring',     'stiffness', v => v.toFixed(0));
+wire('damp-slider',  'damp-val',  'spring',     'damping',   v => v.toFixed(1));
+</script>
+
+</body>
+</html>
