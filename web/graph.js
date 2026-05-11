@@ -421,8 +421,9 @@ Shell.register({
     strandGeo.setAttribute('position', new THREE.BufferAttribute(strandPositions, 3));
     strandGeo.setIndex(strandIndices);
     var strandMat = new THREE.MeshBasicMaterial({
-      color: this._activeColor,
-      side:  THREE.DoubleSide
+      color:       this._activeColor,
+      side:        THREE.DoubleSide,
+      transparent: true   // sort with labels in transparent pass so labels stay on top
     });
     var strandMesh = new THREE.Mesh(strandGeo, strandMat);
     strandMesh.visible = false;
@@ -647,8 +648,9 @@ Shell.register({
       d.budMesh.visible = d.budScale > 0.05;
 
       if (d.budScale > 0.05) {
-        var apexX = src.x + d.breakDirX * d.sourceApex;
-        var apexY = src.y + d.breakDirY * d.sourceApex;
+        var bSrcScale = src.springScale || 1.0;
+        var apexX = src.x + d.breakDirX * d.sourceApex * bSrcScale;
+        var apexY = src.y + d.breakDirY * d.sourceApex * bSrcScale;
         this._updateStrandGeometry(apexX, apexY, d.cursorX, d.cursorY,
                                    d.sourceRadius * d.budScale);
       } else {
@@ -668,11 +670,17 @@ Shell.register({
       var fdx = d.cursorX - src.x;
       var fdy = d.cursorY - src.y;
       var fdist = Math.sqrt(fdx * fdx + fdy * fdy);
-      if (fdist > d.sourceRadius) {
+      // Anchor strand at source's *current* visible edge (sourceRadius scaled
+      // by the spring pop), so the strand stays attached as the source pulses
+      // during step-sequencer playback. Otherwise a gap appears when the
+      // node dips below scale 1.0.
+      var fSrcScale = src.springScale || 1.0;
+      var fAnchor   = d.sourceRadius * fSrcScale;
+      if (fdist > fAnchor) {
         var fdirX = fdx / fdist;
         var fdirY = fdy / fdist;
-        var fApexX = src.x + fdirX * d.sourceRadius;
-        var fApexY = src.y + fdirY * d.sourceRadius;
+        var fApexX = src.x + fdirX * fAnchor;
+        var fApexY = src.y + fdirY * fAnchor;
         this._updateStrandGeometry(fApexX, fApexY, d.cursorX, d.cursorY, d.sourceRadius);
       } else {
         d.strandMesh.visible = false;
@@ -692,11 +700,13 @@ Shell.register({
         var ddx = dx2 - src.x;
         var ddy = dy2 - src.y;
         var ddist = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (ddist > d.sourceRadius) {
+        var dSrcScale = src.springScale || 1.0;
+        var dAnchor   = d.sourceRadius * dSrcScale;
+        if (ddist > dAnchor) {
           var ddirX = ddx / ddist;
           var ddirY = ddy / ddist;
-          var dApexX = src.x + ddirX * d.sourceRadius;
-          var dApexY = src.y + ddirY * d.sourceRadius;
+          var dApexX = src.x + ddirX * dAnchor;
+          var dApexY = src.y + ddirY * dAnchor;
           this._updateStrandGeometry(dApexX, dApexY, dx2, dy2,
                                      d.sourceRadius * d.budScale);
         } else {
@@ -726,11 +736,13 @@ Shell.register({
         var cdx = cx2 - src.x;
         var cdy = cy2 - src.y;
         var cdist = Math.sqrt(cdx * cdx + cdy * cdy);
-        if (cdist > d.sourceRadius) {
+        var cSrcScale = src.springScale || 1.0;
+        var cAnchor   = d.sourceRadius * cSrcScale;
+        if (cdist > cAnchor) {
           var cdirX = cdx / cdist;
           var cdirY = cdy / cdist;
-          var cApexX = src.x + cdirX * d.sourceRadius;
-          var cApexY = src.y + cdirY * d.sourceRadius;
+          var cApexX = src.x + cdirX * cAnchor;
+          var cApexY = src.y + cdirY * cAnchor;
           this._updateStrandGeometry(cApexX, cApexY, cx2, cy2,
                                      d.sourceRadius * d.budScale);
         } else {
