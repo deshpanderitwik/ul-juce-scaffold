@@ -62,18 +62,34 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc)
             if (notesArray == nullptr)
                 return;
 
-            std::vector<int> notes;
-            notes.reserve (static_cast<size_t> (notesArray->size()));
-            for (const auto& n : *notesArray)
-                notes.push_back (static_cast<int> (n));
+            // Each entry is either a single note (int) or an array of notes
+            // to trigger together as a chord. An empty array is a silent step.
+            std::vector<std::vector<int>> steps;
+            steps.reserve (static_cast<size_t> (notesArray->size()));
+            for (const auto& entry : *notesArray)
+            {
+                std::vector<int> chord;
+                if (auto* chordArray = entry.getArray())
+                {
+                    chord.reserve (static_cast<size_t> (chordArray->size()));
+                    for (const auto& n : *chordArray)
+                        chord.push_back (static_cast<int> (n));
+                }
+                else
+                {
+                    chord.push_back (static_cast<int> (entry));
+                }
+                steps.push_back (std::move (chord));
+            }
 
-            int    multiplier = static_cast<int> (payload["subdivision"]);
+            double multiplier = static_cast<double> (payload["subdivision"]);
             double durationMs = static_cast<double> (payload["durationMs"]);
+            bool   legato     = static_cast<bool> (payload["legato"]);
 
-            if (multiplier < 1) multiplier = 2;
+            if (multiplier <= 0.0) multiplier = 2.0;
             if (durationMs <= 0.0) durationMs = 150.0;
 
-            proc.setStepSequence (std::move (notes), multiplier, durationMs);
+            proc.setStepSequence (std::move (steps), multiplier, durationMs, legato);
         })
 
         // ---- Serve web assets ------------------------------------------------

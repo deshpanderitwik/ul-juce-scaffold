@@ -14,14 +14,17 @@ Users route the plugin's MIDI output to another track with a synth to hear the n
 
 ### Web Layer (where all creative work happens)
 - `shell.js` — owns Three.js renderer/scene/camera, animation loop, experiment lifecycle, MIDI API, scale system, experiment selector UI, key/scale selector UI
-- One `.js` file per experiment at `web/` root (filename must match the experiment's `id`, e.g. `graph.js` registers as `'graph'`). `shell.js` dynamically loads each entry from its `EXPERIMENTS` manifest.
+- One `.js` file per experiment at `web/` root (filename must match the experiment's `id`, e.g. `graph.js` registers as `'graph'`). `shell.js` loads each file listed in its `EXPERIMENT_FILES` array; each file self-registers by calling `Shell.register(behavior)` with its own metadata.
 
 ### Experiment Contract
 Every experiment is an object with:
 - `id`, `name`, `description` (metadata)
+- `showOctave: false` (optional metadata) — hides the shell's octave picker while this experiment is active (for experiments that span a fixed octave range)
+- `subdivisions: ['1bar', '1/2', '1/4', ...]` (optional metadata, quantized experiments only) — which entries the shell's subdivision selector offers for this experiment. Defaults to `['1/4', '1/8', '1/8T', '1/16']`. Available keys: `1bar` (one step per 4/4 bar), `1/2`, `1/4`, `1/8`, `1/8T`, `1/16`.
 - `init(context)` — called once on first activation
 - `update(delta, transport)` — called every frame by the shell
 - `pause()`, `resume()`, `destroy()` — lifecycle hooks
+- `step(stepIndex)` (optional) — quantized hook. If present, the shell calls it at every subdivision boundary while the transport plays, shows the subdivision selector in the top bar, and writes a play/stop dim factor to `group.userData.dimFactor` for the experiment to apply to its colors.
 
 The `context` object provides:
 - `scene` — THREE.Scene
@@ -30,6 +33,7 @@ The `context` object provides:
 - `midi.sendNoteOn(note, velocity, channel)`
 - `midi.sendNoteOff(note, channel)`
 - `midi.sendNote(note, velocity, channel, durationMs)`
+- `midi.setStepSequence(steps, durationMs, legato)` — hand a step list to the C++ step sequencer; it advances one step per subdivision, sample-accurately, while the transport plays. Each entry is a single MIDI note or an array of notes to trigger together (chord); an empty array is a silent step. `durationMs` is the gate length, capped at one full step. With `legato: true` the gate is ignored and notes sustain across step boundaries — only the chord diff is sent at each step, so notes shared between consecutive steps ring through. The sequencer is shared: clear it (`setStepSequence([], ...)`) in `pause()` and resend in `resume()`.
 - `scale.getNotesInRange(low, high)` — get valid MIDI notes in current key/scale
 - `scale.getNoteForDegree(degree, octave)` — get MIDI note by scale degree
 - `scale.getScaleDegree(midiNote)` — get degree for a MIDI note
@@ -47,7 +51,7 @@ There is a dedicated experiment file for prototyping: `web/test.js`
 This is the scratchpad. All new ideas start here. The flow is:
 
 1. **Prototype in test.js.** Iterate fast, break things, try ideas. Don't worry about clean code.
-2. **When an idea is ready to keep:** Duplicate test.js to a new file at `web/` root with a descriptive name (e.g. `ascending-walk.js`). Add an entry for it to the `EXPERIMENTS` manifest in `shell.js` (`{ id, name, description }`) — `id` must match the filename without `.js`. Register it with `Shell.register(id, behavior)`. CMake's `file(GLOB web/*.js)` picks it up automatically; no edits to `CMakeLists.txt` or `index.html` needed.
+2. **When an idea is ready to keep:** Duplicate test.js to a new file at `web/` root with a descriptive name (e.g. `ascending-walk.js`). Add its filename to the `EXPERIMENT_FILES` list in `shell.js`. Register it with `Shell.register(behavior)` — the object's `id` must match the filename without `.js`. CMake's `file(GLOB ... CONFIGURE_DEPENDS web/*.js)` picks it up automatically; no edits to `CMakeLists.txt` or `index.html` needed.
 3. **Reset test.js** back to the blank template (see below) for the next idea.
 
 When I say "let's try something" or "prototype this" — work in test.js.
@@ -123,6 +127,7 @@ web/
 
 - **Never modify the C++ layer** unless explicitly asked. All creative work is in the web layer.
 - **The shell owns the render loop.** Experiments implement update(), they don't manage their own animation frames.
+- **Unbind input listeners in `pause()`, rebind in `resume()`.** The shell keeps paused experiments loaded and never calls `destroy()` when switching — a paused experiment that stays subscribed to pointer/mouse events will keep reacting (and sending MIDI) while another experiment is active. Also release any held notes in `pause()`.
 - **Scale-aware:** Use context.scale to get valid notes. Never hardcode note values. Always subscribe to scale changes and rebuild when the key changes.
 - **MIDI only:** Experiments produce MIDI events, not audio. Sound comes from whatever synth the user has on the receiving track in Ableton.
 - **Dark aesthetic:** Keep visuals dark-themed, minimal, clean.

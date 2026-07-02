@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
 
 // =============================================================================
 // Constructor — declare a stereo output bus (required for a synth plugin).
@@ -39,6 +40,11 @@ void PluginProcessor::changeProgramName (int, const juce::String&) {}
 void PluginProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
 {
     currentSampleRate = sampleRate;
+
+    // Pre-allocate so the audio thread never grows these mid-playback.
+    pendingNoteOffs.reserve (kMidiQueueCapacity);
+    heldNotes.reserve (kMidiQueueCapacity);
+    audioSequence.steps.reserve (256);
 }
 
 void PluginProcessor::releaseResources() {}
@@ -114,14 +120,37 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 midiMessages.addEvent (
                     juce::MidiMessage::noteOff (noff.channel, noff.note, static_cast<juce::uint8> (0)), 0);
             pendingNoteOffs.clear();
+
+            for (int held : heldNotes)
+                midiMessages.addEvent (
+                    juce::MidiMessage::noteOff (1, held, static_cast<juce::uint8> (0)), 0);
+            heldNotes.clear();
         }
         lastBeatPos = bufferEndBeat;
 
-        // Copy sequence under SpinLock (very brief)
-        StepSequenceState seq;
+        // Refresh the audio-side copy only when the message thread has posted
+        // a new sequence — the copy may allocate, but only on user edits, not
+        // every block. Try-lock so we never spin against the message thread;
+        // if it's mid-write we just pick the update up next block.
+        if (sequenceDirty.load (std::memory_order_acquire))
         {
-            const juce::SpinLock::ScopedLockType lock (sequenceLock);
-            seq = sequenceState;
+            const juce::SpinLock::ScopedTryLockType tryLock (sequenceLock);
+            if (tryLock.isLocked())
+            {
+                audioSequence = sequenceState;
+                sequenceDirty.store (false, std::memory_order_relaxed);
+            }
+        }
+        const StepSequenceState& seq = audioSequence;
+
+        // If legato notes are ringing but the sequence can no longer sustain
+        // them (cleared, or replaced by a non-legato one), release them now.
+        if ((seq.steps.empty() || ! seq.legato) && ! heldNotes.empty())
+        {
+            for (int held : heldNotes)
+                midiMessages.addEvent (
+                    juce::MidiMessage::noteOff (1, held, static_cast<juce::uint8> (0)), 0);
+            heldNotes.clear();
         }
 
         // Process pending note-offs BEFORE new note-ons so that when the same
@@ -146,11 +175,15 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             }
         }
 
-        if (! seq.notes.empty())
+        if (! seq.steps.empty())
         {
-            const int    mult       = seq.subdivisionMultiplier;
-            const double stepSize   = 1.0 / static_cast<double> (mult);
-            const double durationBeats = stepSize;
+            const double mult       = seq.subdivisionMultiplier;
+            const double stepSize   = 1.0 / mult;
+
+            // Gate length from the UI-supplied duration, capped at one full
+            // step so a note always ends before the same pitch can retrigger.
+            const double durationBeats = juce::jlimit (0.01, stepSize,
+                seq.noteDurationMs * 0.001 * (bpm / 60.0));
 
             int firstStep = static_cast<int> (std::ceil (beatPos * mult));
             int lastStep  = static_cast<int> (std::floor (bufferEndBeat * mult));
@@ -169,23 +202,58 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     (boundaryBeat - beatPos) / beatsPerSample);
                 sampleOffset = juce::jlimit (0, numSamples - 1, sampleOffset);
 
-                int noteIndex = ((s % static_cast<int> (seq.notes.size()))
-                                 + static_cast<int> (seq.notes.size()))
-                                % static_cast<int> (seq.notes.size());
-                int note = seq.notes[static_cast<size_t> (noteIndex)];
+                const int numSteps = static_cast<int> (seq.steps.size());
+                int stepIndex = ((s % numSteps) + numSteps) % numSteps;
+                const auto& chord = seq.steps[static_cast<size_t> (stepIndex)];
 
-                midiMessages.addEvent (
-                    juce::MidiMessage::noteOn (1, note, static_cast<juce::uint8> (100)),
-                    sampleOffset);
+                if (seq.legato)
+                {
+                    // Diff transition: release held notes leaving the chord...
+                    for (auto it = heldNotes.begin(); it != heldNotes.end(); )
+                    {
+                        if (std::find (chord.begin(), chord.end(), *it) == chord.end())
+                        {
+                            midiMessages.addEvent (
+                                juce::MidiMessage::noteOff (1, *it, static_cast<juce::uint8> (0)),
+                                sampleOffset);
+                            it = heldNotes.erase (it);
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
 
-                pendingNoteOffs.push_back ({ note, 1, boundaryBeat + durationBeats });
+                    // ...start notes entering it; notes in both keep ringing.
+                    for (int note : chord)
+                    {
+                        if (std::find (heldNotes.begin(), heldNotes.end(), note) == heldNotes.end())
+                        {
+                            midiMessages.addEvent (
+                                juce::MidiMessage::noteOn (1, note, static_cast<juce::uint8> (100)),
+                                sampleOffset);
+                            heldNotes.push_back (note);
+                        }
+                    }
+                }
+                else
+                {
+                    for (int note : chord)
+                    {
+                        midiMessages.addEvent (
+                            juce::MidiMessage::noteOn (1, note, static_cast<juce::uint8> (100)),
+                            sampleOffset);
+
+                        pendingNoteOffs.push_back ({ note, 1, boundaryBeat + durationBeats });
+                    }
+                }
                 lastStepIndex = s;
             }
         }
     }
     else
     {
-        // Transport stopped — reset step tracking and flush any pending note-offs
+        // Transport stopped — reset step tracking and flush anything sounding
         if (wasPlaying)
         {
             for (const auto& noff : pendingNoteOffs)
@@ -195,6 +263,14 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     0);
             }
             pendingNoteOffs.clear();
+
+            for (int held : heldNotes)
+            {
+                midiMessages.addEvent (
+                    juce::MidiMessage::noteOff (1, held, static_cast<juce::uint8> (0)),
+                    0);
+            }
+            heldNotes.clear();
         }
         lastStepIndex = -1;
     }
@@ -236,12 +312,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 // =============================================================================
 // setStepSequence — called from the MESSAGE thread to update the sequence.
 // =============================================================================
-void PluginProcessor::setStepSequence (std::vector<int> notes, int multiplier, double durationMs)
+void PluginProcessor::setStepSequence (std::vector<std::vector<int>> steps, double multiplier, double durationMs, bool legato)
 {
-    const juce::SpinLock::ScopedLockType lock (sequenceLock);
-    sequenceState.notes                  = std::move (notes);
-    sequenceState.subdivisionMultiplier  = multiplier;
-    sequenceState.noteDurationMs         = durationMs;
+    {
+        const juce::SpinLock::ScopedLockType lock (sequenceLock);
+        sequenceState.steps                  = std::move (steps);
+        sequenceState.subdivisionMultiplier  = multiplier;
+        sequenceState.noteDurationMs         = durationMs;
+        sequenceState.legato                 = legato;
+    }
+    sequenceDirty.store (true, std::memory_order_release);
 }
 
 // =============================================================================

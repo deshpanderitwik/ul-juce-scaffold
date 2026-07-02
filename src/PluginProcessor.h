@@ -40,9 +40,21 @@ struct MidiEventData
 // =============================================================================
 struct StepSequenceState
 {
-    std::vector<int> notes;
-    int  subdivisionMultiplier = 2;
-    double noteDurationMs      = 150.0;
+    // One entry per step; each step holds the notes to trigger together.
+    // A single-note step is a one-element vector; an empty vector is a
+    // silent step (keeps its slot in the cycle).
+    std::vector<std::vector<int>> steps;
+
+    // Steps per beat. May be fractional: 0.5 = half-note steps, 0.25 = one
+    // step per 4/4 bar.
+    double subdivisionMultiplier = 2.0;
+    double noteDurationMs        = 150.0;
+
+    // Legato mode: notes sustain across step boundaries. At each boundary
+    // only the diff is sent — notes leaving the chord get note-offs, notes
+    // entering get note-ons, notes present in both keep ringing.
+    // noteDurationMs is ignored in this mode.
+    bool legato = false;
 };
 
 struct PendingNoteOff
@@ -97,7 +109,7 @@ public:
     void pushMidiEvent (const MidiEventData& event);
 
     // Call from the MESSAGE thread to update the step sequence.
-    void setStepSequence (std::vector<int> notes, int multiplier, double durationMs);
+    void setStepSequence (std::vector<std::vector<int>> steps, double multiplier, double durationMs, bool legato);
 
     // Readable from any thread (each field is atomic).
     TransportState transportState;
@@ -114,9 +126,12 @@ private:
     // Step sequencer state (message thread writes, audio thread reads)
     juce::SpinLock         sequenceLock;
     StepSequenceState      sequenceState;
+    std::atomic<bool>      sequenceDirty { false };
+    StepSequenceState      audioSequence;   // audio-thread copy, refreshed only when dirty
     int                    lastStepIndex = -1;
     bool                   wasPlaying    = false;
     std::vector<PendingNoteOff> pendingNoteOffs;
+    std::vector<int>       heldNotes;   // notes currently sustained by legato mode
 
     double currentSampleRate = 44100.0;
     double lastBeatPos       = 0.0;

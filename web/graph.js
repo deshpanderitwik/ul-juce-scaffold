@@ -50,7 +50,16 @@ Shell.register({
     context.scene.add(this._group);
 
     this._unsubscribeScale = context.scale.onChange(() => {
-      this._rebuildNotes();
+      // Same node count → remap notes in place, preserving the chain.
+      // Different scale length → the ring layout itself is stale (node
+      // positions and octave split were built for the old length), so tear
+      // down and rebuild. The chain can't survive: its indices point at a
+      // layout that no longer exists.
+      if (this._nodes.length === context.scale.getScaleLength() * 2) {
+        this._rebuildNotes();
+      } else {
+        this._rebuild();
+      }
     });
 
     this._buildNodes();
@@ -967,14 +976,38 @@ Shell.register({
   },
 
   _rebuild() {
-    while (this._group.children.length) {
-      this._group.remove(this._group.children[0]);
+    this._destroyDrag();
+
+    for (var i = 0; i < this._nodes.length; i++) {
+      var node = this._nodes[i];
+      this._group.remove(node.mesh);
+      node.mesh.geometry.dispose();
+      node.mesh.material.dispose();
+      this._group.remove(node.labelSprite);
+      if (node.labelSprite.material.map) node.labelSprite.material.map.dispose();
+      node.labelSprite.material.dispose();
     }
+    for (var j = 0; j < this._edges.length; j++) {
+      this._group.remove(this._edges[j].line);
+      this._edges[j].line.geometry.dispose();
+      this._edges[j].line.material.dispose();
+    }
+    if (this._headRing) {
+      this._group.remove(this._headRing);
+      this._headRing.geometry.dispose();
+      this._headRing.material.dispose();
+      this._headRing = null;
+    }
+
     this._nodes = [];
     this._edges = [];
     this._sequence = [];
+    this._cursor = 0;
+    this._hoveredIndex = -1;
     this._buildNodes();
     this._buildHeadRing();
+    this._updateHeadRing();
+    this._sendSequence();
   },
 
   // ==================================================================
@@ -1105,8 +1138,27 @@ Shell.register({
     }
   },
 
-  pause() {},
-  resume() {},
+  // The shell keeps paused experiments loaded (and never calls destroy on
+  // switch), so input listeners must be released here or clicks meant for
+  // the next experiment would keep mutating this one's chain.
+  pause() {
+    this._unbindEvents();
+    this._destroyDrag();
+    this._isPressed = false;
+    this._isDragging = false;
+    this._dragSourceIndex = -1;
+    this._pressIndex = -1;
+    this._hoveredIndex = -1;
+    this._updateCursor();
+    // The C++ sequencer is shared between experiments — hand it back empty
+    // so this chain doesn't keep sounding under whatever activates next.
+    this._context.midi.setStepSequence([], 150);
+  },
+
+  resume() {
+    this._bindEvents();
+    this._sendSequence();
+  },
 
   destroy() {
     this._unbindEvents();

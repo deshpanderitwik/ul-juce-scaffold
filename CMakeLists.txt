@@ -45,7 +45,9 @@ juce_add_plugin(JuceScaffold
 # ==============================================================================
 # 4. Bundle web/index.html as a binary resource
 # ==============================================================================
-file(GLOB WEB_JS_FILES web/*.js)
+# CONFIGURE_DEPENDS makes the build re-glob, so new .js files are picked up
+# without manually re-running the configure step.
+file(GLOB WEB_JS_FILES CONFIGURE_DEPENDS web/*.js)
 juce_add_binary_data(WebResources
     SOURCES
         web/index.html

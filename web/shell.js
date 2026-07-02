@@ -61,6 +61,7 @@
   const midi = {
     _seqNotes: null,
     _seqDurationMs: 150,
+    _seqLegato: false,
 
     sendNoteOn(note, velocity, channel) {
       if (!backendReady) return;
@@ -81,9 +82,10 @@
       setTimeout(() => midi.sendNoteOff(note, channel), durationMs);
     },
 
-    setStepSequence(notes, durationMs) {
+    setStepSequence(notes, durationMs, legato) {
       midi._seqNotes = notes;
       midi._seqDurationMs = durationMs || 150;
+      midi._seqLegato = !!legato;
       midi._sendSequenceToBackend();
     },
 
@@ -93,7 +95,8 @@
       window.__JUCE__.backend.emitEvent('setStepSequence', {
         notes: notes,
         subdivision: SUBDIVISIONS[currentSubdivision] || 2,
-        durationMs: midi._seqDurationMs
+        durationMs: midi._seqDurationMs,
+        legato: midi._seqLegato
       });
     }
   };
@@ -170,7 +173,10 @@
   // ========================================================================
   // Subdivision system (for quantized experiments)
   // ========================================================================
+  // Values are steps per beat; fractional = multi-beat steps ('1bar' assumes 4/4)
   const SUBDIVISIONS = {
+    '1bar': 0.25,
+    '1/2':  0.5,
     '1/4':  1,
     '1/8':  2,
     '1/8T': 3,
@@ -178,11 +184,17 @@
   };
 
   const SUBDIVISION_DISPLAY = {
+    '1bar': '1 bar',
+    '1/2':  '1/2',
     '1/4':  '1/4',
     '1/8':  '1/8',
     '1/8T': '1/8T',
     '1/16': '1/16',
   };
+
+  // What the selector offers unless an experiment declares its own
+  // `subdivisions` list.
+  const DEFAULT_SUBDIVISIONS = ['1/4', '1/8', '1/8T', '1/16'];
 
   let currentSubdivision = localStorage.getItem('shell.subdivision') || '1/8';
   if (!SUBDIVISIONS[currentSubdivision]) currentSubdivision = '1/8';
@@ -256,7 +268,7 @@
   // (id, name, description) via Shell.register(behavior). This list only
   // tells the loader which scripts to fetch and in what order.
   // ========================================================================
-  const EXPERIMENT_FILES = ['test.js', 'scribbler.js', 'graph.js'];
+  const EXPERIMENT_FILES = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js'];
 
   // ========================================================================
   // Experiment lifecycle
@@ -330,7 +342,13 @@
     var isQuantized = typeof entry.experiment.step === 'function';
     divider2.style.display = isQuantized ? '' : 'none';
     subdivisionSelect.style.display = isQuantized ? '' : 'none';
+    if (isQuantized) {
+      rebuildSubdivisionOptions(entry.experiment.subdivisions || DEFAULT_SUBDIVISIONS);
+    }
     lastStepIndex = -1;
+
+    // Experiments that span a fixed octave range can opt out of the octave picker
+    octaveSelect.style.display = entry.experiment.showOctave === false ? 'none' : '';
 
     updateSelector();
   }
@@ -424,16 +442,34 @@
   topBar.appendChild(divider2);
 
   var subdivisionSelect = document.createElement('select');
-  subdivisionSelect.style.display = 'none';
   subdivisionSelect.style.cssText = selectStyle;
-  var subdivKeys = Object.keys(SUBDIVISIONS);
-  for (var sdi = 0; sdi < subdivKeys.length; sdi++) {
-    var opt = document.createElement('option');
-    opt.value = subdivKeys[sdi];
-    opt.textContent = SUBDIVISION_DISPLAY[subdivKeys[sdi]];
-    if (subdivKeys[sdi] === currentSubdivision) opt.selected = true;
-    subdivisionSelect.appendChild(opt);
+  subdivisionSelect.style.display = 'none';
+
+  // (Re)populate the subdivision dropdown from a list of SUBDIVISIONS keys.
+  // If the current choice isn't offered, fall back and push the corrected
+  // multiplier to the backend so the sequencer doesn't keep a stale rate.
+  function rebuildSubdivisionOptions(allowed) {
+    while (subdivisionSelect.firstChild) {
+      subdivisionSelect.removeChild(subdivisionSelect.firstChild);
+    }
+    for (var sdi = 0; sdi < allowed.length; sdi++) {
+      var key = allowed[sdi];
+      if (!SUBDIVISIONS[key]) continue;
+      var opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = SUBDIVISION_DISPLAY[key];
+      subdivisionSelect.appendChild(opt);
+    }
+    if (allowed.indexOf(currentSubdivision) === -1) {
+      currentSubdivision = allowed.indexOf('1/8') !== -1 ? '1/8' : allowed[0];
+      localStorage.setItem('shell.subdivision', currentSubdivision);
+      lastStepIndex = -1;
+      midi._sendSequenceToBackend();
+    }
+    subdivisionSelect.value = currentSubdivision;
   }
+  rebuildSubdivisionOptions(DEFAULT_SUBDIVISIONS);
+
   subdivisionSelect.addEventListener('change', function () {
     currentSubdivision = subdivisionSelect.value;
     localStorage.setItem('shell.subdivision', currentSubdivision);

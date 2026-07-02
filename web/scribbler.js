@@ -49,9 +49,28 @@ const FoundationsExperiment = {
     this._boundMove = function (e) { self._onMove(e); };
     this._boundUp   = function (e) { self._onUp(e); };
 
+    this._bindInput();
+  },
+
+  _bindInput() {
     document.addEventListener('mousedown', this._boundDown, true);
     document.addEventListener('mousemove', this._boundMove, true);
     document.addEventListener('mouseup',   this._boundUp,   true);
+  },
+
+  _unbindInput() {
+    document.removeEventListener('mousedown', this._boundDown, true);
+    document.removeEventListener('mousemove', this._boundMove, true);
+    document.removeEventListener('mouseup',   this._boundUp,   true);
+  },
+
+  _releaseHeldNotes() {
+    for (var i = 0; i < this._balls.length; i++) {
+      if (this._balls[i].isActive) {
+        this._balls[i].isActive = false;
+        this._context.midi.sendNoteOff(this._balls[i].midiNote, 1);
+      }
+    }
   },
 
   _rebuild() {
@@ -440,21 +459,35 @@ const FoundationsExperiment = {
     }
   },
 
-  pause() {},
-  resume() {},
+  // The shell keeps paused experiments loaded (and never calls destroy on
+  // switch), so the document-level listeners must be released here or
+  // gestures in the next experiment would keep triggering these balls.
+  pause() {
+    this._unbindInput();
+    this._dragging = false;
+    this._resizingOval = false;
+    this._releaseHeldNotes();
 
-  destroy() {
-    for (var i = 0; i < this._balls.length; i++) {
-      if (this._balls[i].isActive) {
-        this._context.midi.sendNoteOff(this._balls[i].midiNote, 1);
-      }
+    if (this._activeLine) {
+      this._group.remove(this._activeLine);
+      this._activeLine.geometry.dispose();
+      this._activeLine.material.dispose();
+      this._activeLine = null;
     }
+    this._points = [];
 
     document.body.style.cursor = 'default';
+  },
+
+  resume() {
+    this._bindInput();
+  },
+
+  destroy() {
+    this._releaseHeldNotes();
+    document.body.style.cursor = 'default';
     if (this._unsubscribeScale) this._unsubscribeScale();
-    if (this._boundDown) document.removeEventListener('mousedown', this._boundDown, true);
-    if (this._boundMove) document.removeEventListener('mousemove', this._boundMove, true);
-    if (this._boundUp)   document.removeEventListener('mouseup',   this._boundUp,   true);
+    this._unbindInput();
 
     if (this._group && this._group.parent) {
       this._group.parent.remove(this._group);
