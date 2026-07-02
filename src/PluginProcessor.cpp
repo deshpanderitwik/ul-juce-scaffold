@@ -350,10 +350,44 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 }
 
 // =============================================================================
-// State — nothing to persist yet.
+// Web state — JSON blobs keyed by experiment id, saved with the DAW project.
 // =============================================================================
-void PluginProcessor::getStateInformation (juce::MemoryBlock&) {}
-void PluginProcessor::setStateInformation (const void*, int) {}
+void PluginProcessor::setWebState (const juce::String& key, const juce::String& json)
+{
+    const juce::ScopedLock lock (stateLock);
+    webState[key] = json;
+}
+
+juce::var PluginProcessor::getWebStateAsVar() const
+{
+    auto* obj = new juce::DynamicObject();
+    {
+        const juce::ScopedLock lock (stateLock);
+        for (const auto& [key, json] : webState)
+            obj->setProperty (key, json);
+    }
+    return juce::var (obj);
+}
+
+void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    auto jsonStr = juce::JSON::toString (getWebStateAsVar(), true);
+    destData.replaceAll (jsonStr.toRawUTF8(), jsonStr.getNumBytesAsUTF8());
+}
+
+void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    auto parsed = juce::JSON::parse (
+        juce::String::fromUTF8 (static_cast<const char*> (data), sizeInBytes));
+
+    if (auto* obj = parsed.getDynamicObject())
+    {
+        const juce::ScopedLock lock (stateLock);
+        webState.clear();
+        for (const auto& prop : obj->getProperties())
+            webState[prop.name.toString()] = prop.value.toString();
+    }
+}
 
 // =============================================================================
 // This free function is how JUCE discovers our processor.

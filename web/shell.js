@@ -120,9 +120,54 @@
       transport.isPlaying          = data.isPlaying        ?? false;
       transport.sessionId          = data.sessionId        ?? '';
     });
+
+    window.__JUCE__.backend.addEventListener('webStateData', function (data) {
+      stateData = data || {};
+      while (stateWaiters.length) stateWaiters.shift()();
+    });
+    window.__JUCE__.backend.emitEvent('requestState', {});
   }
 
   initBackend();
+
+  // ========================================================================
+  // Persistent state — JSON blobs keyed by experiment id, stored in the
+  // processor and saved/restored with the DAW project. Arrives async after
+  // the backend connects, hence the waiter queue.
+  // ========================================================================
+  let stateData = null;      // key → JSON string, null until webStateData arrives
+  const stateWaiters = [];
+
+  function parseState(id) {
+    if (!stateData || typeof stateData[id] !== 'string' || stateData[id] === '') {
+      return null;
+    }
+    try { return JSON.parse(stateData[id]); } catch (e) { return null; }
+  }
+
+  function makeStore(id) {
+    return {
+      // Persist a JSON-serializable value as this experiment's saved state.
+      save(value) {
+        if (!backendReady) return;
+        window.__JUCE__.backend.emitEvent('saveState', {
+          key: id,
+          value: JSON.stringify(value)
+        });
+      },
+
+      // Load this experiment's saved state. The callback receives the saved
+      // value, or null if there is none. May fire immediately (state already
+      // arrived) or later (still waiting on the backend).
+      load(callback) {
+        if (stateData !== null) {
+          callback(parseState(id));
+        } else {
+          stateWaiters.push(function () { callback(parseState(id)); });
+        }
+      }
+    };
+  }
 
   // ========================================================================
   // Utilities
@@ -276,13 +321,14 @@
   const experiments = new Map();   // id → { experiment, group, initialized }
   let activeId = null;
 
-  function buildContext(group) {
+  function buildContext(group, id) {
     return {
       scene:        group,       // THREE.Group — experiment adds meshes here
       camera,                    // read-only reference
       renderer,                  // read-only reference
       midi,
       scale,
+      store:        makeStore(id),  // per-experiment persistent state
       getTransport,
       getSize
     };
@@ -333,7 +379,7 @@
 
     if (!entry.initialized) {
       entry.initialized = true;
-      entry.experiment.init(buildContext(entry.group));
+      entry.experiment.init(buildContext(entry.group, id));
     } else {
       if (entry.experiment.resume) entry.experiment.resume();
     }

@@ -39,6 +39,7 @@ The `context` object provides:
 - `scale.getScaleDegree(midiNote)` — get degree for a MIDI note
 - `scale.onChange(callback)` — subscribe to key/scale changes, returns unsubscribe fn
 - `scale.getKey()` — returns { root, scaleName }
+- `store.save(value)` / `store.load(callback)` — per-experiment persistent state. `save` stores any JSON-serializable value in the C++ processor; it is saved inside the DAW project and survives the editor being closed/reopened and the project being reloaded. `load`'s callback receives the saved value or null; it may fire immediately or after the backend delivers state — call it once in `init` and treat it as the restore path. Save on every mutation; prefer this over localStorage (which is shared across plugin instances and not part of the project file).
 - `getTransport()` — returns { tempo, beatPosition, timeSigNumerator, timeSigDenominator, isPlaying }
 - `getSize()` — returns { width, height }
 

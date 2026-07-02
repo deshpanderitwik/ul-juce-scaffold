@@ -4,6 +4,7 @@
 #include <juce_core/juce_core.h>
 #include <array>
 #include <atomic>
+#include <map>
 #include <vector>
 
 // =============================================================================
@@ -111,6 +112,14 @@ public:
     // Call from the MESSAGE thread to update the step sequence.
     void setStepSequence (std::vector<std::vector<int>> steps, double multiplier, double durationMs, bool legato);
 
+    // --- Web state ---
+    // Arbitrary JSON blobs keyed by experiment id, round-tripped through
+    // get/setStateInformation so they persist in the DAW project (and
+    // survive the editor being closed and reopened). The host may call the
+    // state callbacks from any thread, so access is locked.
+    void setWebState (const juce::String& key, const juce::String& json);
+    juce::var getWebStateAsVar() const;   // { key: jsonString, ... }
+
     // Readable from any thread (each field is atomic).
     TransportState transportState;
 
@@ -135,6 +144,10 @@ private:
 
     double currentSampleRate = 44100.0;
     double lastBeatPos       = 0.0;
+
+    // Web state store (see setWebState)
+    mutable juce::CriticalSection stateLock;
+    std::map<juce::String, juce::String> webState;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };

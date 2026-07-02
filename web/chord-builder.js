@@ -67,6 +67,38 @@ const ChordBuilderExperiment = {
 
     this._rebuild();
     this._bindEvents();
+
+    // Restore the saved progression (persisted in the plugin, saved with
+    // the DAW project). Arrives async; may fire immediately if cached.
+    context.store.load((data) => this._restoreState(data));
+  },
+
+  _restoreState(data) {
+    if (!data || !Array.isArray(data.chords)) return;
+
+    // Drop malformed entries and node indices that don't fit the current
+    // grid (e.g. the scale length changed since the state was saved).
+    const chords = data.chords
+      .filter(c => Array.isArray(c))
+      .map(c => c.filter(idx =>
+        typeof idx === 'number' && idx >= 0 && idx < this._nodes.length));
+    if (chords.length === 0) chords.push([]);
+
+    this._chords = chords;
+    this._currentChord = Math.max(0, Math.min(
+      typeof data.currentChord === 'number' ? data.currentChord : 0,
+      chords.length - 1));
+
+    this._rebuildPanel();
+    this._applyCurrentChord();
+    this._sendSequence();
+  },
+
+  _saveState() {
+    this._context.store.save({
+      chords: this._chords,
+      currentChord: this._currentChord
+    });
   },
 
   _rebuild() {
@@ -264,6 +296,7 @@ const ChordBuilderExperiment = {
     this._currentChord = index;
     // Dot colors follow _currentChord in update()
     this._applyCurrentChord();
+    this._saveState();
   },
 
   _addChord() {
@@ -310,6 +343,7 @@ const ChordBuilderExperiment = {
       steps.push(this._chords[i].map(idx => this._nodes[idx].midiNote));
     }
     this._context.midi.setStepSequence(steps, 60000, false);
+    this._saveState();
   },
 
   _makeLabel(text) {

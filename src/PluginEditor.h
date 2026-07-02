@@ -15,7 +15,7 @@ public:
 private:
     void timerCallback() override;
 
-    static juce::WebBrowserComponent::Options createBrowserOptions (PluginProcessor&);
+    static juce::WebBrowserComponent::Options createBrowserOptions (PluginProcessor&, PluginEditor&);
 
     PluginProcessor& processorRef;
     juce::WebBrowserComponent browser;

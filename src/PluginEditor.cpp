@@ -25,8 +25,11 @@ static juce::String getMimeType (const juce::String& filename)
 // This is a static helper so we can call it in the initialiser list.
 // =============================================================================
 juce::WebBrowserComponent::Options
-PluginEditor::createBrowserOptions (PluginProcessor& proc)
+PluginEditor::createBrowserOptions (PluginProcessor& proc, PluginEditor& editor)
 {
+    // NOTE: `editor` is not fully constructed yet (this runs in the browser
+    // member's initialiser). The lambdas only dereference it when events
+    // arrive from the loaded page, long after construction completes.
     using Options  = juce::WebBrowserComponent::Options;
     using Resource = juce::WebBrowserComponent::Resource;
 
@@ -92,6 +95,22 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc)
             proc.setStepSequence (std::move (steps), multiplier, durationMs, legato);
         })
 
+        // ---- JS → C++ : persist experiment state -----------------------------
+        .withEventListener ("saveState", [&proc] (const juce::var& payload)
+        {
+            auto key = payload["key"].toString();
+            if (key.isEmpty())
+                return;
+            proc.setWebState (key, payload["value"].toString());
+        })
+
+        // ---- JS → C++ → JS : page asks for saved state after it loads --------
+        .withEventListener ("requestState", [&proc, &editor] (const juce::var&)
+        {
+            editor.browser.emitEventIfBrowserIsVisible ("webStateData",
+                                                        proc.getWebStateAsVar());
+        })
+
         // ---- Serve web assets ------------------------------------------------
         // Debug: read from the source web/ directory (live reload).
         // Release: read from BinaryData (self-contained binary).
@@ -155,7 +174,7 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc)
 PluginEditor::PluginEditor (PluginProcessor& p)
     : AudioProcessorEditor (p),
       processorRef (p),
-      browser (createBrowserOptions (p))
+      browser (createBrowserOptions (p, *this))
 {
     setSize (900, 600);
     setResizable (false, false);
