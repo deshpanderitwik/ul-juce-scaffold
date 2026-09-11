@@ -5,7 +5,7 @@
 // percussive note hitting on every step of the selected subdivision. Drag
 // it away from the center and the pulse speeds up CONTINUOUSLY — no
 // stepped levels — the further you pull, the faster it goes. Let go and
-// it springs back, the rate gliding down with it.
+// it ramps back to center, the rate gliding down with it.
 //
 // Two engines: at rest the C++ step sequencer plays the note on-grid.
 // While displaced, a free-running JS oscillator takes over so the rate
@@ -50,9 +50,11 @@ const ScratchExperiment = {
   _pullRange:   0,       // px of pull that reaches the finest level (set from size)
   _cx: 0, _cy: 0,        // anchor (center of the canvas)
   _x:  0, _y:  0,        // circle position
-  _vx: 0, _vy: 0,
-  _stiffness:   180,
-  _damping:     14,
+
+  // Release ramp: displacement shrinks at constant speed so the rate
+  // glides down evenly (linear in log-rate). A full pull takes _rampSec
+  // to reach 1×; a half pull takes half that.
+  _rampSec:     2.0,
 
   _pressed:     false,
   _dragging:    false,
@@ -110,8 +112,6 @@ const ScratchExperiment = {
     this._cy = size.height / 2 - 10;   // nudge below the top bar's visual weight
     this._x = this._cx;
     this._y = this._cy;
-    this._vx = 0;
-    this._vy = 0;
     this._pullRange = Math.min(size.width, size.height) * 0.36;
 
     // Home marker
@@ -318,8 +318,6 @@ const ScratchExperiment = {
         this._x = this._cx + (px / pullDist) * disp;
         this._y = this._cy + (py / pullDist) * disp;
       }
-      this._vx = 0;
-      this._vy = 0;
     }
 
     this._updateCursor(p);
@@ -333,7 +331,7 @@ const ScratchExperiment = {
     try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
 
     if (!wasDrag) this._togglePlaying();
-    // On drag release the spring in update() takes over.
+    // On drag release the ramp in update() takes over.
     this._updateCursor(this._clientToWorld(e));
   },
 
@@ -359,22 +357,23 @@ const ScratchExperiment = {
     if (!this._circle) return;
     var dt = Math.min(delta, 0.05);
 
-    // Spring home when not being held
+    // Ramp home when not being held
     if (!this._dragging) {
-      var ax = -(this._x - this._cx) * this._stiffness - this._vx * this._damping;
-      var ay = -(this._y - this._cy) * this._stiffness - this._vy * this._damping;
-      this._vx += ax * dt;
-      this._vy += ay * dt;
-      this._x += this._vx * dt;
-      this._y += this._vy * dt;
       var dx0 = this._x - this._cx, dy0 = this._y - this._cy;
-      if (dx0 * dx0 + dy0 * dy0 < 0.05 && this._vx * this._vx + this._vy * this._vy < 0.5) {
-        this._x = this._cx; this._y = this._cy; this._vx = 0; this._vy = 0;
+      var d0  = Math.sqrt(dx0 * dx0 + dy0 * dy0);
+      if (d0 > 0) {
+        var d1 = Math.max(0, d0 - (this._pullRange / this._rampSec) * dt);
+        if (d1 <= this._homeEps) {
+          this._x = this._cx; this._y = this._cy;
+        } else {
+          this._x = this._cx + dx0 * (d1 / d0);
+          this._y = this._cy + dy0 * (d1 / d0);
+        }
       }
     }
 
-    // Displacement drives the rate — continuously, and on the way home
-    // too, so a release glides back down instead of snapping to 1×.
+    // Displacement drives the rate — continuously, and during the release
+    // ramp too, so letting go glides back down instead of snapping to 1×.
     var dx = this._x - this._cx, dy = this._y - this._cy;
     var dist = Math.sqrt(dx * dx + dy * dy);
     this._ratchet = this._ratchetForDisplacement(dist);
@@ -441,7 +440,7 @@ const ScratchExperiment = {
   resume() {
     this._bindEvents();
     this._free = false;
-    this._x = this._cx; this._y = this._cy; this._vx = 0; this._vy = 0;
+    this._x = this._cx; this._y = this._cy;
     if (this._playing) this._sendSequence();
   },
 
