@@ -3,15 +3,20 @@
 //
 // One circle sits in the middle. Click it to start (or stop) a single
 // percussive note hitting on every step of the selected subdivision. Drag
-// it away from the center and it ratchets: the further you pull, the more
-// hits per step. Let go and it springs back, the ratchet unwinding as it
-// travels home.
+// it away from the center and the pulse speeds up CONTINUOUSLY — no
+// stepped levels — the further you pull, the faster it goes. Let go and
+// it springs back, the rate gliding down with it.
+//
+// Two engines: at rest the C++ step sequencer plays the note on-grid.
+// While displaced, a free-running JS oscillator takes over so the rate
+// can be any value between 1× and the maximum, tempo-relative but not
+// quantized. Handover happens both ways at the center.
 // ==========================================================================
 
 const ScratchExperiment = {
   id:          'scratch',
   name:        'Scratch',
-  description: 'Pull a percussion pulse away from center to ratchet it',
+  description: 'Pull a percussion pulse away from center to speed it up',
 
   // Longer steps make the ratchet levels audible as distinct rhythms
   subdivisions: ['1/2', '1/4', '1/8', '1/8T', '1/16'],
@@ -29,11 +34,16 @@ const ScratchExperiment = {
   _velocity: 100,
   _playing:  false,
 
-  // Hits per step at each pull distance, innermost first
-  _levels:   [1, 2, 3, 4, 6, 8],
-  _division: 1,          // current hits per step
-  _stepMult: 2,          // steps per beat, inferred from step() calls
-  _lastGateMs: -1,
+  // Rate multiplier vs pull: 1× at center → _maxRatchet at full pull,
+  // exponential so the speed-up feels even across the whole travel.
+  _maxRatchet: 8,
+  _ratchet:    1,        // current multiplier (continuous)
+  _stepMult:   2,        // steps per beat, inferred from step() calls
+
+  // Free-running engine (active while displaced from center)
+  _free:       false,
+  _freePhase:  0,        // 0..1, wraps on each hit
+  _homeEps:    1.5,      // px — closer than this counts as "home"
 
   // --- Geometry / physics ---
   _radius:      42,
@@ -60,8 +70,6 @@ const ScratchExperiment = {
   _labelTex:    null,
   _labelValue:  -1,
   _flash:       0,       // 1 → 0 pulse on each hit
-  _lastSubHit:  -1,      // sub-hit index within the current step (visual pulses)
-  _lastStepBeat: 0,
 
   _bgColor:     new THREE.Color(0x111111),
   _idleColor:   new THREE.Color(0x333333),
@@ -158,68 +166,76 @@ const ScratchExperiment = {
     return ring;
   },
 
-  _renderLabel(division) {
-    if (division === this._labelValue) return;
-    this._labelValue = division;
+  _renderLabel(text) {
+    if (text === this._labelValue) return;
+    this._labelValue = text;
     var cx = this._labelCanvas.getContext('2d');
     cx.clearRect(0, 0, 96, 32);
     cx.font = 'bold 15px -apple-system, BlinkMacSystemFont, sans-serif';
     cx.fillStyle = 'rgba(255,255,255,0.85)';
     cx.textAlign = 'center';
     cx.textBaseline = 'middle';
-    cx.fillText('×' + division, 48, 16);
+    cx.fillText(text, 48, 16);
     this._labelTex.needsUpdate = true;
   },
 
   // ====================================================================
-  // Sequencer
+  // Engines
   // ====================================================================
 
-  // One step holding `division` copies of the note, phrased evenly across
-  // the step. Gate is kept well under one sub-interval so consecutive hits
-  // on the same pitch never overlap.
+  _gateMsForPeriod(periodMs) {
+    return Math.max(8, Math.min(100, periodMs * 0.4));
+  },
+
+  _baseHz(transport) {
+    return ((transport.tempo || 120) / 60) * this._stepMult;
+  },
+
+  // Quantized engine: one note per step, on-grid, run by the C++ sequencer.
   _sendSequence() {
-    if (!this._playing) {
+    if (!this._playing || this._free) {
       this._context.midi.setStepSequence([], 50);
-      this._lastGateMs = -1;
       return;
     }
-
-    var tempo = this._context.getTransport().tempo || 120;
-    var stepMs = (60000 / tempo) / this._stepMult;
-    var gateMs = Math.max(8, Math.min(100, (stepMs / this._division) * 0.4));
-    this._lastGateMs = gateMs;
-
-    var chord = [];
-    for (var i = 0; i < this._division; i++) {
-      chord.push(i === 0 ? this._note : { n: this._note, d: i / this._division });
-    }
-    this._context.midi.setStepSequence([chord], gateMs);
+    var stepMs = 1000 / this._baseHz(this._context.getTransport());
+    this._context.midi.setStepSequence([this._note], this._gateMsForPeriod(stepMs));
   },
 
-  _setDivision(d) {
-    if (d === this._division) return;
-    this._division = d;
-    this._lastSubHit = -1;
-    if (this._playing) this._sendSequence();
+  // Hand off grid → free. Seed the phase from the transport so the first
+  // free hit lands where the next on-grid hit would have.
+  _enterFree(transport) {
+    if (this._free) return;
+    this._free = true;
+    var beat = transport.beatPosition * this._stepMult;
+    this._freePhase = beat - Math.floor(beat);
+    this._context.midi.setStepSequence([], 50);
   },
 
-  _divisionForDisplacement(dist) {
+  // Hand off free → grid. The sequencer picks up at the next boundary.
+  _exitFree() {
+    if (!this._free) return;
+    this._free = false;
+    this._sendSequence();
+  },
+
+  _ratchetForDisplacement(dist) {
     var norm = Math.max(0, Math.min(1, dist / this._pullRange));
-    var idx = Math.floor(norm * this._levels.length);
-    if (idx >= this._levels.length) idx = this._levels.length - 1;
-    return this._levels[idx];
+    return Math.pow(this._maxRatchet, norm);
+  },
+
+  _hit(periodMs) {
+    this._context.midi.sendNote(this._note, this._velocity, 1, this._gateMsForPeriod(periodMs));
+    this._flash = 1.0;
   },
 
   _togglePlaying() {
     this._playing = !this._playing;
-    this._lastSubHit = -1;
     this._sendSequence();
   },
 
   // The shell calls this at each subdivision boundary. We use it to learn
-  // the step rate (for gate length and visual sub-pulses) — the sequencer
-  // itself is already running sample-accurately in C++.
+  // the step rate (base for the free engine, gate length for the grid) and
+  // to pulse the visuals — the grid engine itself runs in C++.
   step(stepIndex) {
     var beat = this._context.getTransport().beatPosition;
     var candidates = [0.25, 0.5, 1, 2, 3, 4];
@@ -230,9 +246,9 @@ const ScratchExperiment = {
     }
     if (best !== this._stepMult) {
       this._stepMult = best;
-      if (this._playing) this._sendSequence();
+      if (this._playing && !this._free) this._sendSequence();
     }
-    this._lastSubHit = -1;
+    if (this._playing && !this._free) this._flash = 1.0;
   },
 
   // ====================================================================
@@ -357,27 +373,27 @@ const ScratchExperiment = {
       }
     }
 
-    // Displacement drives the ratchet — including on the way back home,
-    // so a release unwinds audibly instead of snapping to ×1.
+    // Displacement drives the rate — continuously, and on the way home
+    // too, so a release glides back down instead of snapping to 1×.
     var dx = this._x - this._cx, dy = this._y - this._cy;
     var dist = Math.sqrt(dx * dx + dy * dy);
-    this._setDivision(this._divisionForDisplacement(dist));
+    this._ratchet = this._ratchetForDisplacement(dist);
 
-    // Tempo drift changes the gate we computed — resend if it moved enough
-    if (this._playing && this._lastGateMs > 0) {
-      var tempo = transport.tempo || 120;
-      var stepMs = (60000 / tempo) / this._stepMult;
-      var gateMs = Math.max(8, Math.min(100, (stepMs / this._division) * 0.4));
-      if (Math.abs(gateMs - this._lastGateMs) / this._lastGateMs > 0.2) this._sendSequence();
-    }
+    // Engine handover tracks position regardless of play state, so a
+    // pulse stopped mid-pull still comes back on the grid when restarted.
+    var displaced = this._dragging || dist > this._homeEps;
+    if (displaced) this._enterFree(transport);
+    else           this._exitFree();
 
-    // Visual sub-pulses: estimate where we are inside the current step
-    if (this._playing && transport.isPlaying) {
-      var phase = (transport.beatPosition * this._stepMult) % 1;
-      var sub = Math.floor(phase * this._division);
-      if (sub !== this._lastSubHit) {
-        this._lastSubHit = sub;
-        this._flash = 1.0;
+    // Free engine: advance phase at the current rate, fire on wrap.
+    // At most one hit per frame — stacking several identical note-ons in
+    // one frame would just be noise.
+    if (this._playing && this._free && transport.isPlaying) {
+      var hz = this._baseHz(transport) * this._ratchet;
+      this._freePhase += hz * dt;
+      if (this._freePhase >= 1) {
+        this._freePhase -= Math.floor(this._freePhase);
+        this._hit(1000 / hz);
       }
     }
     this._flash = Math.max(0, this._flash - dt * 10);
@@ -401,10 +417,10 @@ const ScratchExperiment = {
     this._tether.material.opacity = Math.min(1, dist / 40) * 0.6;
     this._anchor.material.opacity = 0.25 + Math.min(1, dist / 40) * 0.45;
 
-    var showLabel = this._division > 1;
+    var showLabel = this._ratchet > 1.02;
     this._label.visible = showLabel;
     if (showLabel) {
-      this._renderLabel(this._division);
+      this._renderLabel('×' + this._ratchet.toFixed(1));
       this._label.position.set(this._x, this._y - this._radius - 18, 0.6);
     }
   },
@@ -424,7 +440,8 @@ const ScratchExperiment = {
 
   resume() {
     this._bindEvents();
-    this._lastSubHit = -1;
+    this._free = false;
+    this._x = this._cx; this._y = this._cy; this._vx = 0; this._vy = 0;
     if (this._playing) this._sendSequence();
   },
 
