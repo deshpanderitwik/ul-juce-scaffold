@@ -39,12 +39,23 @@ struct MidiEventData
 // Step sequence state — written on the MESSAGE thread, read on the AUDIO thread.
 // Protected by a SpinLock (brief hold times, no allocation under lock).
 // =============================================================================
+// A note within a step. delay phrases the note later into its step: it
+// triggers at boundary + delay * stepSize (0 = exactly on the boundary).
+// probability gates each hit: 1 always plays, 0 never, in between the
+// dice are rolled fresh every time the step comes around.
+struct StepNote
+{
+    int    note        = 60;
+    double delay       = 0.0;   // fraction of one step, [0, 1)
+    double probability = 1.0;   // chance this note triggers, [0, 1]
+};
+
 struct StepSequenceState
 {
     // One entry per step; each step holds the notes to trigger together.
     // A single-note step is a one-element vector; an empty vector is a
     // silent step (keeps its slot in the cycle).
-    std::vector<std::vector<int>> steps;
+    std::vector<std::vector<StepNote>> steps;
 
     // Steps per beat. May be fractional: 0.5 = half-note steps, 0.25 = one
     // step per 4/4 bar.
@@ -54,7 +65,7 @@ struct StepSequenceState
     // Legato mode: notes sustain across step boundaries. At each boundary
     // only the diff is sent — notes leaving the chord get note-offs, notes
     // entering get note-ons, notes present in both keep ringing.
-    // noteDurationMs is ignored in this mode.
+    // noteDurationMs and per-note delays are ignored in this mode.
     bool legato = false;
 };
 
@@ -63,6 +74,15 @@ struct PendingNoteOff
     int    note         = 60;
     int    channel      = 1;
     double beatPosition = 0.0;
+};
+
+// A phrased (delayed) note waiting for its trigger beat.
+struct PendingNoteOn
+{
+    int    note         = 60;
+    int    channel      = 1;
+    double beatPosition = 0.0;   // when to trigger
+    double gateBeats    = 0.5;   // note length once triggered
 };
 
 // =============================================================================
@@ -110,7 +130,7 @@ public:
     void pushMidiEvent (const MidiEventData& event);
 
     // Call from the MESSAGE thread to update the step sequence.
-    void setStepSequence (std::vector<std::vector<int>> steps, double multiplier, double durationMs, bool legato);
+    void setStepSequence (std::vector<std::vector<StepNote>> steps, double multiplier, double durationMs, bool legato);
 
     // --- Web state ---
     // Arbitrary JSON blobs keyed by experiment id, round-tripped through
@@ -140,10 +160,13 @@ private:
     int                    lastStepIndex = -1;
     bool                   wasPlaying    = false;
     std::vector<PendingNoteOff> pendingNoteOffs;
+    std::vector<PendingNoteOn>  pendingNoteOns;   // phrased notes awaiting their beat
     std::vector<int>       heldNotes;   // notes currently sustained by legato mode
 
     double currentSampleRate = 44100.0;
     double lastBeatPos       = 0.0;
+
+    juce::Random random;   // audio-thread dice for note probability
 
     // Web state store (see setWebState)
     mutable juce::CriticalSection stateLock;

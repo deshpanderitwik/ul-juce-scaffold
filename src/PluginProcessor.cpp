@@ -43,6 +43,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int /*samplesPerBlock*/)
 
     // Pre-allocate so the audio thread never grows these mid-playback.
     pendingNoteOffs.reserve (kMidiQueueCapacity);
+    pendingNoteOns.reserve (kMidiQueueCapacity);
     heldNotes.reserve (kMidiQueueCapacity);
     audioSequence.steps.reserve (256);
 }
@@ -125,6 +126,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 midiMessages.addEvent (
                     juce::MidiMessage::noteOff (1, held, static_cast<juce::uint8> (0)), 0);
             heldNotes.clear();
+
+            pendingNoteOns.clear();   // not sounding yet — just drop them
         }
         lastBeatPos = bufferEndBeat;
 
@@ -137,8 +140,107 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             const juce::SpinLock::ScopedTryLockType tryLock (sequenceLock);
             if (tryLock.isLocked())
             {
+                // Keep the pre-edit chord for the step we're inside — the
+                // reconciliation below diffs the edit against it.
+                std::vector<StepNote> oldChord;
+                const int    oldN    = static_cast<int> (audioSequence.steps.size());
+                const double oldMult = audioSequence.subdivisionMultiplier;
+                const bool   hadStep = lastStepIndex >= 0 && oldN > 0 && ! audioSequence.legato;
+                if (hadStep)
+                    oldChord = audioSequence.steps[
+                        static_cast<size_t> (((lastStepIndex % oldN) + oldN) % oldN)];
+
                 audioSequence = sequenceState;
                 sequenceDirty.store (false, std::memory_order_relaxed);
+
+                // Mid-step reconciliation: apply the edit to the step that is
+                // sounding RIGHT NOW instead of waiting for the next boundary.
+                // Removed notes stop immediately; added notes strike
+                // immediately (or at their phrased moment if it's still
+                // ahead), with note-offs kept on-grid. Unchanged notes are
+                // left alone so an edit can't retrigger them or re-roll
+                // their probability dice. Only done while the step mapping
+                // is stable — same cycle length and subdivision — because a
+                // length change re-maps which chord "now" even is, and
+                // swapping the sounding chord mid-step on every add/delete
+                // would glitch more than it helps.
+                const auto& newSeq = audioSequence;
+                const int   newN   = static_cast<int> (newSeq.steps.size());
+
+                const bool sameMult =
+                    std::abs (newSeq.subdivisionMultiplier - oldMult) < 1.0e-9;
+
+                if (hadStep && ! newSeq.legato && newN == oldN && sameMult)
+                {
+                    const auto& newChord = newSeq.steps[
+                        static_cast<size_t> (((lastStepIndex % newN) + newN) % newN)];
+
+                    auto inNewChord = [&newChord] (int note)
+                    {
+                        return std::any_of (newChord.begin(), newChord.end(),
+                            [note] (const StepNote& sn) { return sn.note == note; });
+                    };
+                    auto wasInOldChord = [&oldChord] (int note)
+                    {
+                        return std::any_of (oldChord.begin(), oldChord.end(),
+                            [note] (const StepNote& sn) { return sn.note == note; });
+                    };
+
+                    // Removed notes: silence ringing ones now, drop phrased
+                    // ones that haven't fired yet.
+                    for (auto it = pendingNoteOffs.begin(); it != pendingNoteOffs.end(); )
+                    {
+                        if (! inNewChord (it->note))
+                        {
+                            midiMessages.addEvent (
+                                juce::MidiMessage::noteOff (it->channel, it->note, static_cast<juce::uint8> (0)), 0);
+                            it = pendingNoteOffs.erase (it);
+                        }
+                        else
+                        {
+                            ++it;
+                        }
+                    }
+                    for (auto it = pendingNoteOns.begin(); it != pendingNoteOns.end(); )
+                    {
+                        if (! inNewChord (it->note))
+                            it = pendingNoteOns.erase (it);
+                        else
+                            ++it;
+                    }
+
+                    // Added notes: strike them into the remainder of the step.
+                    const double stepLen      = 1.0 / newSeq.subdivisionMultiplier;
+                    const double boundaryBeat = static_cast<double> (lastStepIndex) * stepLen;
+                    const double gateBeats    = juce::jlimit (0.01, stepLen,
+                        newSeq.noteDurationMs * 0.001 * (bpm / 60.0));
+
+                    for (const auto& sn : newChord)
+                    {
+                        if (wasInOldChord (sn.note))
+                            continue;   // untouched by this edit
+                        if (sn.probability < 1.0 && random.nextDouble() >= sn.probability)
+                            continue;
+
+                        const double triggerBeat = boundaryBeat + sn.delay * stepLen;
+                        const double offBeat     = triggerBeat + gateBeats;
+
+                        if (offBeat <= beatPos)
+                            continue;   // its window in this step already passed
+
+                        if (triggerBeat > beatPos)
+                        {
+                            // Phrased moment still ahead — let it fire on time
+                            pendingNoteOns.push_back ({ sn.note, 1, triggerBeat, gateBeats });
+                        }
+                        else
+                        {
+                            midiMessages.addEvent (
+                                juce::MidiMessage::noteOn (1, sn.note, static_cast<juce::uint8> (100)), 0);
+                            pendingNoteOffs.push_back ({ sn.note, 1, offBeat });
+                        }
+                    }
+                }
             }
         }
         const StepSequenceState& seq = audioSequence;
@@ -152,6 +254,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     juce::MidiMessage::noteOff (1, held, static_cast<juce::uint8> (0)), 0);
             heldNotes.clear();
         }
+
+        // Phrased notes scheduled from a sequence that no longer exists
+        if (seq.steps.empty())
+            pendingNoteOns.clear();
 
         // Process pending note-offs BEFORE new note-ons so that when the same
         // MIDI note has a note-off and note-on at the same sample, the off clears first.
@@ -211,10 +317,14 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     // Diff transition: release held notes leaving the chord...
                     for (auto it = heldNotes.begin(); it != heldNotes.end(); )
                     {
-                        if (std::find (chord.begin(), chord.end(), *it) == chord.end())
+                        const int held = *it;
+                        const bool stays = std::any_of (chord.begin(), chord.end(),
+                            [held] (const StepNote& sn) { return sn.note == held; });
+
+                        if (! stays)
                         {
                             midiMessages.addEvent (
-                                juce::MidiMessage::noteOff (1, *it, static_cast<juce::uint8> (0)),
+                                juce::MidiMessage::noteOff (1, held, static_cast<juce::uint8> (0)),
                                 sampleOffset);
                             it = heldNotes.erase (it);
                         }
@@ -225,29 +335,68 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     }
 
                     // ...start notes entering it; notes in both keep ringing.
-                    for (int note : chord)
+                    for (const auto& sn : chord)
                     {
-                        if (std::find (heldNotes.begin(), heldNotes.end(), note) == heldNotes.end())
+                        if (std::find (heldNotes.begin(), heldNotes.end(), sn.note) == heldNotes.end())
                         {
                             midiMessages.addEvent (
-                                juce::MidiMessage::noteOn (1, note, static_cast<juce::uint8> (100)),
+                                juce::MidiMessage::noteOn (1, sn.note, static_cast<juce::uint8> (100)),
                                 sampleOffset);
-                            heldNotes.push_back (note);
+                            heldNotes.push_back (sn.note);
                         }
                     }
                 }
                 else
                 {
-                    for (int note : chord)
+                    for (const auto& sn : chord)
                     {
-                        midiMessages.addEvent (
-                            juce::MidiMessage::noteOn (1, note, static_cast<juce::uint8> (100)),
-                            sampleOffset);
+                        // Roll the dice once per hit — probability below 1.0
+                        // makes the note trigger only sometimes.
+                        if (sn.probability < 1.0 && random.nextDouble() >= sn.probability)
+                            continue;
 
-                        pendingNoteOffs.push_back ({ note, 1, boundaryBeat + durationBeats });
+                        if (sn.delay <= 0.0)
+                        {
+                            midiMessages.addEvent (
+                                juce::MidiMessage::noteOn (1, sn.note, static_cast<juce::uint8> (100)),
+                                sampleOffset);
+
+                            pendingNoteOffs.push_back ({ sn.note, 1, boundaryBeat + durationBeats });
+                        }
+                        else
+                        {
+                            // Phrased — trigger later within the step.
+                            pendingNoteOns.push_back (
+                                { sn.note, 1, boundaryBeat + sn.delay * stepSize, durationBeats });
+                        }
                     }
                 }
                 lastStepIndex = s;
+            }
+        }
+
+        // Fire phrased note-ons whose beat falls inside this buffer. Runs
+        // after the boundary loop so a small delay can trigger in the same
+        // block it was scheduled in; runs after the note-off pass so an off
+        // and on for the same pitch at one sample stay off-then-on.
+        for (auto it = pendingNoteOns.begin(); it != pendingNoteOns.end(); )
+        {
+            if (it->beatPosition < bufferEndBeat)
+            {
+                int sampleOffset = static_cast<int> (
+                    (it->beatPosition - beatPos) / beatsPerSample);
+                sampleOffset = juce::jlimit (0, numSamples - 1, sampleOffset);
+
+                midiMessages.addEvent (
+                    juce::MidiMessage::noteOn (it->channel, it->note, static_cast<juce::uint8> (100)),
+                    sampleOffset);
+
+                pendingNoteOffs.push_back ({ it->note, it->channel, it->beatPosition + it->gateBeats });
+                it = pendingNoteOns.erase (it);
+            }
+            else
+            {
+                ++it;
             }
         }
     }
@@ -271,6 +420,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     0);
             }
             heldNotes.clear();
+
+            pendingNoteOns.clear();
         }
         lastStepIndex = -1;
     }
@@ -312,7 +463,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 // =============================================================================
 // setStepSequence — called from the MESSAGE thread to update the sequence.
 // =============================================================================
-void PluginProcessor::setStepSequence (std::vector<std::vector<int>> steps, double multiplier, double durationMs, bool legato)
+void PluginProcessor::setStepSequence (std::vector<std::vector<StepNote>> steps, double multiplier, double durationMs, bool legato)
 {
     {
         const juce::SpinLock::ScopedLockType lock (sequenceLock);

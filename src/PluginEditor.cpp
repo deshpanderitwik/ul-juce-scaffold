@@ -65,22 +65,46 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc, PluginEditor& editor)
             if (notesArray == nullptr)
                 return;
 
-            // Each entry is either a single note (int) or an array of notes
-            // to trigger together as a chord. An empty array is a silent step.
-            std::vector<std::vector<int>> steps;
+            // Each entry is a single note or an array holding a chord.
+            // A note — in either position — is a bare int or an { n, d, p }
+            // object: d phrases it later into the step (fraction of one
+            // step), p is its hit probability. An empty array is a silent
+            // step.
+            auto parseNote = [] (const juce::var& v)
+            {
+                StepNote sn;
+                if (v.isObject())
+                {
+                    sn.note  = static_cast<int> (v["n"]);
+                    sn.delay = juce::jlimit (0.0, 0.99, static_cast<double> (v["d"]));
+
+                    // Missing "p" must mean "always plays", not 0
+                    const auto p = v["p"];
+                    sn.probability = p.isVoid()
+                        ? 1.0
+                        : juce::jlimit (0.0, 1.0, static_cast<double> (p));
+                }
+                else
+                {
+                    sn.note = static_cast<int> (v);
+                }
+                return sn;
+            };
+
+            std::vector<std::vector<StepNote>> steps;
             steps.reserve (static_cast<size_t> (notesArray->size()));
             for (const auto& entry : *notesArray)
             {
-                std::vector<int> chord;
+                std::vector<StepNote> chord;
                 if (auto* chordArray = entry.getArray())
                 {
                     chord.reserve (static_cast<size_t> (chordArray->size()));
                     for (const auto& n : *chordArray)
-                        chord.push_back (static_cast<int> (n));
+                        chord.push_back (parseNote (n));
                 }
                 else
                 {
-                    chord.push_back (static_cast<int> (entry));
+                    chord.push_back (parseNote (entry));
                 }
                 steps.push_back (std::move (chord));
             }

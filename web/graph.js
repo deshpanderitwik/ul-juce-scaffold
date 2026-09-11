@@ -44,6 +44,20 @@ Shell.register({
   _activeColor:   0xffffff,
   _headRing:      null,
 
+  // Probability readout — a number that pops up under the hovered node;
+  // click-drag it vertically to set the chance of that note actually
+  // hitting when its step comes around (up = more likely).
+  _probNode:        -1,      // node the readout is currently shown for
+  _probDragging:    false,
+  _probSliderHover: false,   // pointer over the number itself
+  _probLabel:       null,    // sprite showing "NN%"
+  _probCanvas:      null,
+  _probTexture:     null,
+  _probLabelValue:  -1,      // last rendered percent (skip redundant redraws)
+  _probDragStartY:  0,
+  _probDragStartVal: 0,
+  _probDragRangePx: 100,     // vertical px for a full 0→100% sweep
+
   init(context) {
     this._context = context;
     this._group = new THREE.Group();
@@ -64,8 +78,80 @@ Shell.register({
 
     this._buildNodes();
     this._buildHeadRing();
+    this._buildProbLabel();
     this._chainRestored = false;
     this._bindEvents();
+  },
+
+  _buildProbLabel() {
+    this._probCanvas = document.createElement('canvas');
+    this._probCanvas.width  = 96;
+    this._probCanvas.height = 32;
+    this._probTexture = new THREE.CanvasTexture(this._probCanvas);
+    var mat = new THREE.SpriteMaterial({ map: this._probTexture, transparent: true });
+    this._probLabel = new THREE.Sprite(mat);
+    this._probLabel.scale.set(64, 22, 1);
+    this._probLabel.visible = false;
+    this._group.add(this._probLabel);
+    this._probLabelValue = -1;
+  },
+
+  _renderProbLabel(pct) {
+    if (pct === this._probLabelValue) return;
+    this._probLabelValue = pct;
+    var cx = this._probCanvas.getContext('2d');
+    cx.clearRect(0, 0, 96, 32);
+    cx.font = 'bold 15px -apple-system, BlinkMacSystemFont, sans-serif';
+    cx.fillStyle = '#ffffff';
+    cx.textAlign = 'center';
+    cx.textBaseline = 'middle';
+    cx.fillText(pct + '%', 48, 16);
+    this._probTexture.needsUpdate = true;
+  },
+
+  _probLabelCenter() {
+    var node = this._nodes[this._probNode];
+    var r = node.ring === 0 ? this._nodeRadiusInner : this._nodeRadius;
+    return { x: node.x, y: node.y - r - 16 };
+  },
+
+  _updateProbDisplay() {
+    if (!this._probLabel) return;
+    var show = this._probNode !== -1;
+    this._probLabel.visible = show;
+    if (!show) return;
+
+    var c = this._probLabelCenter();
+    this._probLabel.position.set(c.x, c.y, 0.4);
+    this._renderProbLabel(Math.round(this._nodes[this._probNode].probability * 100));
+  },
+
+  _probNumberHit(w) {
+    if (this._probNode === -1) return false;
+    var c = this._probLabelCenter();
+    return Math.abs(w.x - c.x) <= 22 && Math.abs(w.y - c.y) <= 11;
+  },
+
+  // Keeps the readout alive while the pointer travels from the node down to
+  // it (same trick as the chord-builder affordances — without this, the
+  // gap between the node's hit circle and the number would hide it).
+  _inProbCorridor(w) {
+    if (this._probNode === -1) return false;
+    var node  = this._nodes[this._probNode];
+    var r     = node.ring === 0 ? this._nodeRadiusInner : this._nodeRadius;
+    var halfW = Math.max(30, r);
+    return w.x >= node.x - halfW && w.x <= node.x + halfW &&
+           w.y >= node.y - r - 28 && w.y <= node.y + r;
+  },
+
+  // Vertical scrub: value follows the drag distance from where the press
+  // started, so there's no jump on the first move.
+  _setProbFromDrag(y) {
+    var node = this._nodes[this._probNode];
+    if (!node) return;
+    var t = this._probDragStartVal + (y - this._probDragStartY) / this._probDragRangePx;
+    node.probability = Math.max(0, Math.min(1, t));
+    this._updateProbDisplay();
   },
 
   _buildHeadRing() {
@@ -154,6 +240,19 @@ Shell.register({
 
   _handlePointerDown(e) {
     if (e.button !== 0) return;
+
+    // The probability readout swallows presses before node logic runs.
+    // Value doesn't change on the press itself — only on vertical drag.
+    var w0 = this._clientToWorld(e);
+    if (this._probNode !== -1 && this._probNumberHit(w0)) {
+      this._probDragging = true;
+      this._probDragStartY = w0.y;
+      this._probDragStartVal = this._nodes[this._probNode].probability;
+      try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
+      this._updateCursor();
+      return;
+    }
+
     var rect = this._context.renderer.domElement.getBoundingClientRect();
     this._pressX = e.clientX - rect.left;
     this._pressY = e.clientY - rect.top;
@@ -164,6 +263,15 @@ Shell.register({
   },
 
   _handlePointerUp(e) {
+    if (this._probDragging) {
+      this._probDragging = false;
+      try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
+      // Commit: pushes probabilities to the sequencer and persists them
+      this._sendSequence();
+      this._updateCursor();
+      return;
+    }
+
     if (!this._isPressed) return;
 
     var wasDragging  = this._isDragging;
@@ -210,6 +318,10 @@ Shell.register({
     this._isDragging      = false;
     this._dragSourceIndex = -1;
     this._pressIndex      = -1;
+    this._probDragging    = false;
+    this._probSliderHover = false;
+    this._probNode        = -1;
+    this._updateProbDisplay();
     this._destroyDrag();
     try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor();
@@ -224,7 +336,9 @@ Shell.register({
   _updateCursor() {
     var canvas = this._context.renderer.domElement;
     var cursor = '';
-    if (this._isDragging) {
+    if (this._probDragging || this._probSliderHover) {
+      cursor = 'ns-resize';
+    } else if (this._isDragging) {
       cursor = 'grabbing';
     } else if (this._isPressed
         && this._pressIndex !== -1
@@ -257,6 +371,11 @@ Shell.register({
   },
 
   _handlePointerMove(e) {
+    if (this._probDragging) {
+      this._setProbFromDrag(this._clientToWorld(e).y);
+      return;
+    }
+
     // Detect drag entry: pressed on an active node + moved past threshold
     if (this._isPressed && !this._isDragging && this._pressIndex !== -1) {
       var src = this._nodes[this._pressIndex];
@@ -286,6 +405,27 @@ Shell.register({
     if (hit !== this._hoveredIndex) {
       this._hoveredIndex = hit;
     }
+
+    // Probability slider hover state (hidden during chewing-gum drags)
+    if (this._isDragging) {
+      this._probSliderHover = false;
+      if (this._probNode !== -1) {
+        this._probNode = -1;
+        this._updateProbDisplay();
+      }
+    } else {
+      var wp = this._clientToWorld(e);
+      this._probSliderHover = this._probNode !== -1 && this._probNumberHit(wp);
+      if (hit !== -1) {
+        // Probability only applies to notes in the chain — no readout for
+        // inactive nodes.
+        this._probNode = this._nodes[hit].active ? hit : -1;
+      } else if (this._probNode !== -1 && !this._inProbCorridor(wp)) {
+        this._probNode = -1;
+      }
+      this._updateProbDisplay();
+    }
+
     this._updateCursor();
   },
 
@@ -400,6 +540,11 @@ Shell.register({
 
   _initDrag(sourceIdx, worldX, worldY) {
     if (this._drag) this._destroyDrag();
+
+    // A relocation drag and the probability slider don't mix
+    this._probNode = -1;
+    this._probSliderHover = false;
+    this._updateProbDisplay();
 
     var srcNode = this._nodes[sourceIdx];
     var radius  = srcNode.ring === 0 ? this._nodeRadiusInner : this._nodeRadius;
@@ -924,6 +1069,7 @@ Shell.register({
           y: y,
           active: false,
           flashTimer: 0,
+          probability: 1.0,
           targetColor: new THREE.Color(this._inactiveColor),
           labelTargetColor: new THREE.Color(0xaaaaaa),
           springScale: 1.0,
@@ -999,13 +1145,26 @@ Shell.register({
       this._headRing = null;
     }
 
+    if (this._probLabel) {
+      this._group.remove(this._probLabel);
+      if (this._probLabel.material.map) this._probLabel.material.map.dispose();
+      this._probLabel.material.dispose();
+      this._probLabel = null;
+      this._probCanvas = null;
+      this._probTexture = null;
+    }
+
     this._nodes = [];
     this._edges = [];
     this._sequence = [];
     this._cursor = 0;
     this._hoveredIndex = -1;
+    this._probNode = -1;
+    this._probDragging = false;
+    this._probSliderHover = false;
     this._buildNodes();
     this._buildHeadRing();
+    this._buildProbLabel();
     this._updateHeadRing();
     this._sendSequence();
   },
@@ -1017,7 +1176,10 @@ Shell.register({
   _sendSequence() {
     var notes = [];
     for (var i = 0; i < this._sequence.length; i++) {
-      notes.push(this._nodes[this._sequence[i]].midiNote);
+      var node = this._nodes[this._sequence[i]];
+      notes.push(node.probability < 1
+        ? { n: node.midiNote, p: node.probability }
+        : node.midiNote);
     }
     this._context.midi.setStepSequence(notes, 150);
     this._saveChain();
@@ -1029,6 +1191,8 @@ Shell.register({
 
   _saveChain() {
     localStorage.setItem('graph.chain', JSON.stringify(this._sequence));
+    localStorage.setItem('graph.probs',
+      JSON.stringify(this._nodes.map(function (n) { return n.probability; })));
     localStorage.setItem('graph.sessionId', this._getSessionId());
   },
 
@@ -1037,8 +1201,24 @@ Shell.register({
     var storedSession = localStorage.getItem('graph.sessionId');
     if (storedSession !== sessionId) {
       localStorage.removeItem('graph.chain');
+      localStorage.removeItem('graph.probs');
       localStorage.removeItem('graph.sessionId');
       return;
+    }
+
+    var savedProbs = localStorage.getItem('graph.probs');
+    if (savedProbs) {
+      try {
+        var probs = JSON.parse(savedProbs);
+        if (Array.isArray(probs)) {
+          var count = Math.min(probs.length, this._nodes.length);
+          for (var pi = 0; pi < count; pi++) {
+            if (typeof probs[pi] === 'number') {
+              this._nodes[pi].probability = Math.max(0, Math.min(1, probs[pi]));
+            }
+          }
+        }
+      } catch (e2) {}
     }
 
     var saved = localStorage.getItem('graph.chain');
@@ -1094,6 +1274,16 @@ Shell.register({
       this._restoreChain();
     }
 
+    // If the node under the readout left the chain (click-retract, clear,
+    // drag-relocate), drop the readout without waiting for a pointer move.
+    if (this._probNode !== -1
+        && (!this._nodes[this._probNode] || !this._nodes[this._probNode].active)) {
+      this._probNode = -1;
+      this._probSliderHover = false;
+      this._updateProbDisplay();
+      this._updateCursor();
+    }
+
     this._updateDrag(delta);
 
     var stiffness = 300;
@@ -1113,6 +1303,12 @@ Shell.register({
       var s = node.springScale;
       node.mesh.scale.set(s, s, 1);
       node.labelSprite.scale.set(64 * s, 22 * s, 1);
+
+      // Active nodes fade with their hit probability so uncertain notes
+      // read as such at a glance
+      node.mesh.material.opacity = node.active
+        ? 0.35 + 0.65 * node.probability
+        : 1.0;
 
       this._dimmedColor.copy(node.targetColor).lerp(this._bgColor, 1 - dim);
       this._dimmedLabelColor.copy(node.labelTargetColor).lerp(this._bgColor, 1 - dim);
@@ -1149,6 +1345,10 @@ Shell.register({
     this._dragSourceIndex = -1;
     this._pressIndex = -1;
     this._hoveredIndex = -1;
+    this._probDragging = false;
+    this._probSliderHover = false;
+    this._probNode = -1;
+    this._updateProbDisplay();
     this._updateCursor();
     // The C++ sequencer is shared between experiments — hand it back empty
     // so this chain doesn't keep sounding under whatever activates next.

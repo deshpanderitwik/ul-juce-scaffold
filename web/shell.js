@@ -123,6 +123,9 @@
 
     window.__JUCE__.backend.addEventListener('webStateData', function (data) {
       stateData = data || {};
+      // Shell state first (key/scale/subdivision/active experiment), so
+      // experiment restores that follow see the right grid and rates.
+      applyShellState(parseState('shell'));
       while (stateWaiters.length) stateWaiters.shift()();
     });
     window.__JUCE__.backend.emitEvent('requestState', {});
@@ -143,6 +146,55 @@
       return null;
     }
     try { return JSON.parse(stateData[id]); } catch (e) { return null; }
+  }
+
+  // ------------------------------------------------------------------
+  // Shell's own persisted state: key/scale/octave/subdivision/active
+  // experiment, under the reserved store key 'shell'. Saved on every
+  // change; applied when the plugin state arrives on load.
+  // ------------------------------------------------------------------
+  let pendingStateExperiment = null;  // experiment to activate once its script loads
+
+  function saveShellState() {
+    shellStore.save({
+      root:        currentRoot,
+      scaleName:   currentScaleName,
+      octave:      currentOctave,
+      subdivision: currentSubdivision,
+      experiment:  activeId
+    });
+  }
+
+  function applyShellState(s) {
+    if (!s) return;
+
+    if (typeof s.root === 'number' && s.root >= 0 && s.root < 12) currentRoot = s.root;
+    if (SCALES[s.scaleName])                                      currentScaleName = s.scaleName;
+    if (typeof s.octave === 'number' && s.octave >= 0 && s.octave <= 7) currentOctave = s.octave;
+    if (SUBDIVISIONS[s.subdivision]) {
+      currentSubdivision = s.subdivision;
+      localStorage.setItem('shell.subdivision', currentSubdivision);
+      lastStepIndex = -1;
+    }
+
+    keySelect.value    = String(currentRoot);
+    scaleSelect.value  = currentScaleName;
+    octaveSelect.value = String(currentOctave);
+    notifyScaleChange();
+
+    if (typeof s.experiment === 'string' && s.experiment) {
+      if (experiments.has(s.experiment)) {
+        activate(s.experiment);
+      } else {
+        // Script not loaded yet — loadExperiments() will pick this up.
+        pendingStateExperiment = s.experiment;
+      }
+    }
+
+    // If no activate() ran (same experiment already active), the selector
+    // and sequencer still need the restored subdivision.
+    subdivisionSelect.value = currentSubdivision;
+    midi._sendSequenceToBackend();
   }
 
   function makeStore(id) {
@@ -168,6 +220,8 @@
       }
     };
   }
+
+  const shellStore = makeStore('shell');
 
   // ========================================================================
   // Utilities
@@ -256,6 +310,7 @@
       octave:    currentOctave
     };
     for (const cb of scaleListeners) cb(info);
+    saveShellState();
   }
 
   const scale = {
@@ -397,6 +452,7 @@
     octaveSelect.style.display = entry.experiment.showOctave === false ? 'none' : '';
 
     updateSelector();
+    saveShellState();
   }
 
   // Expose to global scope so experiment scripts can call Shell.register()
@@ -514,13 +570,17 @@
     }
     subdivisionSelect.value = currentSubdivision;
   }
-  rebuildSubdivisionOptions(DEFAULT_SUBDIVISIONS);
+  // NOTE: no initial population — the selector stays empty (and hidden)
+  // until a quantized experiment activates and supplies its list. Populating
+  // it with the default list here would coerce a saved '1bar'/'1/2' choice
+  // back to '1/8' before the experiment that supports it gets a say.
 
   subdivisionSelect.addEventListener('change', function () {
     currentSubdivision = subdivisionSelect.value;
     localStorage.setItem('shell.subdivision', currentSubdivision);
     lastStepIndex = -1;
     midi._sendSequenceToBackend();
+    saveShellState();
   });
   topBar.appendChild(subdivisionSelect);
 
@@ -626,7 +686,12 @@
     }
     chain.then(() => {
       if (experiments.size === 0 || activeId !== null) return;
-      const saved = localStorage.getItem('shell.experiment');
+      // Plugin-state restore (if it arrived before the scripts finished
+      // loading) wins over the localStorage fallback.
+      const fromState = pendingStateExperiment;
+      const saved = (fromState && experiments.has(fromState))
+        ? fromState
+        : localStorage.getItem('shell.experiment');
       const id = (saved && experiments.has(saved)) ? saved : experiments.keys().next().value;
       activate(id);
     });
