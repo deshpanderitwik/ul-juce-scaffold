@@ -368,7 +368,12 @@
   // (id, name, description) via Shell.register(behavior). This list only
   // tells the loader which scripts to fetch and in what order.
   // ========================================================================
-  const EXPERIMENT_FILES = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js', 'scratch.js', 'random-walker.js', 'scale-flick.js'];
+  const EXPERIMENT_FILES = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js'];
+
+  // Shelved — files stay in web/ but aren't loaded, so they don't appear in
+  // the selector. Move a name back into EXPERIMENT_FILES to bring it back.
+  // eslint-disable-next-line no-unused-vars
+  const HIDDEN_EXPERIMENT_FILES = ['scratch.js', 'random-walker.js', 'scale-flick.js'];
 
   // ========================================================================
   // Experiment lifecycle
