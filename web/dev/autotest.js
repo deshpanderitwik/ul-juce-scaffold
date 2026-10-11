@@ -59,11 +59,26 @@
   // ----------------------------------------------------------------------
   // Probe-specific checks
   // ----------------------------------------------------------------------
-  function findSubdivisionSelect() {
-    const selects = Array.from(document.querySelectorAll('select'));
+  // The subdivision selector is the only select that offers a note value.
+  function findSubdivisionSelect(doc, offered) {
+    const selects = Array.from((doc || document).querySelectorAll('select'));
     return selects.find(function (s) {
-      return Array.from(s.options).some(function (o) { return o.value === '1/16'; });
+      return Array.from(s.options).some(function (o) { return o.value === (offered || '1/16'); });
     });
+  }
+
+  function findKeySelect(doc) {
+    const selects = Array.from((doc || document).querySelectorAll('select'));
+    return selects.find(function (s) { return s.options.length === 12 && s.options[0].textContent === 'C'; });
+  }
+
+  function chooseOption(select, value) {
+    select.value = value;
+    select.dispatchEvent(new Event('change'));
+  }
+
+  function savedShell(m) {
+    try { return JSON.parse(m.saved().shell); } catch (e) { return null; }
   }
 
   function lastMessage(pred) {
@@ -177,6 +192,34 @@
     }
   }
 
+  // A scale listener that throws must not keep the listeners behind it, or the
+  // shell-state save, from running; the error is reported, not lost.
+  function probeScaleListeners() {
+    const P = window.__probe;
+    const M = mock();
+    const keySelect = findKeySelect();
+    const errorsBefore = M.errors.length;
+    const callsBefore = P.scaleCalls.length;
+
+    P.armScaleThrow = true;
+    chooseOption(keySelect, '5');
+    P.armScaleThrow = false;
+
+    const last = P.scaleCalls[P.scaleCalls.length - 1];
+    check('scale: a throwing listener does not stop the one after it',
+      P.scaleThrows === 1 && P.scaleCalls.length === callsBefore + 1 && last && last.root === 'F',
+      'throws=' + P.scaleThrows + ' calls=' + (P.scaleCalls.length - callsBefore) + ' last=' + JSON.stringify(last));
+    const shell = savedShell(M);
+    check('scale: the key change is still saved', shell && shell.root === 5, JSON.stringify(shell));
+    const reported = M.errors.slice(errorsBefore);
+    check('scale: the thrown error is reported through the shell',
+      reported.length === 1 && reported[0].indexOf('probe scale listener') !== -1, reported.join(' | '));
+    // That one report was the point of the test; the later no-errors checks start clean.
+    M.errors.splice(errorsBefore);
+
+    chooseOption(keySelect, '0');
+  }
+
   async function probeAfterPlay() {
     const P = window.__probe;
     check('probe: step() called while playing', P.stepCalls > 0, 'calls=' + P.stepCalls);
@@ -208,6 +251,22 @@
     check('probe: an inactive handle stays silent', P.staleHandleDelta === 0, 'delta=' + P.staleHandleDelta);
     check('probe: cursor reset on deactivation', canvas.style.cursor === '', JSON.stringify(canvas.style.cursor));
     check('probe: pause() called once', P.pauses === 1, 'pauses=' + P.pauses);
+
+    // The sequence the probe stored through its handle while paused is kept,
+    // not sent: the sequencer belongs to the active experiment.
+    const sent = M.lastSequence;
+    check('probe: a paused experiment\'s setStepSequence is not sent while it is paused',
+      sent && sent.tag === stats().tag && sent.steps.length === 0 && sent.stepsPerBeat === 0.5,
+      sent ? JSON.stringify(sent) : 'none');
+    const sel = findSubdivisionSelect(document, '1/4');
+    const shell = savedShell(M);
+    check('subdivision: an experiment whose list lacks the current rate gets one it offers',
+      sel && sel.value === '1/2' && Array.from(sel.options).every(function (o) { return o.value !== '1/16'; }),
+      sel ? sel.value : 'no selector');
+    check('subdivision: the rate the probe last used is kept while probe-b is active',
+      shell && shell.subdivision === '1/2' && shell.subdivisions && shell.subdivisions.probe === '1/16' &&
+      shell.subdivisions['probe-b'] === '1/2' && shell.experiment === 'probe-b',
+      JSON.stringify(shell));
   }
 
   async function probeSwitchBack(tag0) {
@@ -217,11 +276,134 @@
     check('probe: resume() called once', P.resumes === 1, 'resumes=' + P.resumes);
     check('probe: tag incremented by each activation', stats().tag === tag0 + 2 && seq && seq.tag === tag0 + 2,
       'tag0=' + tag0 + ' shell=' + stats().tag + ' sent=' + (seq && seq.tag));
-    check('probe: resumed experiment gets its own stored sequence without resending it',
-      seq && same(seq.steps.map(function (s) { return s.map(function (n) { return n.n; }); }), [[53], [55], [57]]),
-      seq ? JSON.stringify(seq.steps) : 'none');
+    check('probe: resuming hands over the sequence stored while paused, gate and legato included',
+      seq && same(seq.steps.map(function (s) { return s.map(function (n) { return n.n; }); }), P.pausedWrite.steps) &&
+      seq.durationMs === P.pausedWrite.durationMs && seq.legato === P.pausedWrite.legato,
+      seq ? JSON.stringify(seq) : 'none');
     check('probe: getSubdivision on resume', P.subdivisionAtResume && P.subdivisionAtResume.key === '1/16',
       JSON.stringify(P.subdivisionAtResume));
+    const sel = findSubdivisionSelect();
+    const shell = savedShell(M);
+    check('subdivision: switching away and back restores the experiment\'s own rate',
+      sel && sel.value === '1/16' && seq && seq.stepsPerBeat === 4 &&
+      shell && shell.subdivision === '1/16' && shell.subdivisions && shell.subdivisions.probe === '1/16' &&
+      shell.subdivisions['probe-b'] === '1/2' && shell.experiment === 'probe',
+      (sel ? sel.value : 'no selector') + ' spb=' + (seq && seq.stepsPerBeat) + ' ' + JSON.stringify(shell));
+    check('subdivision: restoring a rate on activation does not call onSubdivisionChange',
+      same(P.subChanges.map(function (c) { return c.key; }), ['1/16']),
+      JSON.stringify(P.subChanges));
+  }
+
+  // ----------------------------------------------------------------------
+  // Saved shell state planted before the page loads: each case opens a
+  // throwaway copy of the harness in an iframe whose mock starts from the
+  // given project state (seed=) and the sequence C++ is "already playing".
+  // ----------------------------------------------------------------------
+  const PLAYING = {
+    steps: [[{ n: 60, d: 0, p: 1, v: 100 }], [{ n: 64, d: 0, p: 1, v: 100 }]],
+    stepsPerBeat: 2, durationMs: 150, legato: false, tag: 4242
+  };
+
+  async function openSeeded(shell, sequence, quiet) {
+    const q = new URLSearchParams({ probe: '1', panel: '0', seed: JSON.stringify({ web: { shell: JSON.stringify(shell) }, sequence }) });
+    if (quiet) q.set('probeQuiet', '1');
+    const frame = document.createElement('iframe');
+    frame.style.cssText = 'position:fixed; left:0; top:0; width:900px; height:600px; border:0;' +
+      'opacity:0; pointer-events:none; z-index:-1;';
+    frame.src = location.pathname + '?' + q.toString();
+    document.body.appendChild(frame);
+    const ready = await waitFor(function () {
+      try { return frame.contentWindow.Shell.getStats().booted && frame.contentWindow.Shell.getStats().activeId !== null; }
+      catch (e) { return false; }
+    }, 15000);
+    await sleep(500);
+    return { frame, win: frame.contentWindow, ready };
+  }
+
+  const sentSequences = function (win) { return win.__mock.counts.setStepSequence || 0; };
+
+  // The saved experiment is not registered: it is shown as the first one, and
+  // the sequence C++ is playing stays until something hands the sequencer over.
+  async function unregisteredExperimentPass() {
+    const saved = { root: 2, scaleName: 'dorian', octave: 3, subdivision: '1bar', subdivisions: { ghost: '1bar' }, experiment: 'ghost' };
+
+    // Left alone until the user switches experiment.
+    let page = await openSeeded(saved, PLAYING, true);
+    let w = page.win;
+    if (!page.ready) { check('unregistered experiment: page booted', false, 'no boot'); page.frame.remove(); return; }
+    check('unregistered experiment: the first experiment is shown',
+      w.Shell.getStats().activeId === 'probe', w.Shell.getStats().activeId);
+    check('unregistered experiment: nothing is sent to the sequencer at boot',
+      sentSequences(w) === 0 && same(w.__mock.lastSequence, PLAYING),
+      sentSequences(w) + ' sent, last ' + JSON.stringify(w.__mock.lastSequence));
+    chooseOption(findKeySelect(w.document), '7');
+    let shell = savedShell(w.__mock);
+    check('unregistered experiment: a later save keeps naming it and its rate',
+      shell && shell.root === 7 && shell.experiment === 'ghost' && shell.subdivisions && shell.subdivisions.ghost === '1bar',
+      JSON.stringify(shell));
+    w.Shell.activate('probe-b');
+    await waitFor(function () { return sentSequences(w) > 0; }, 3000);
+    await sleep(200);
+    shell = savedShell(w.__mock);
+    check('unregistered experiment: switching experiment hands the sequencer over',
+      sentSequences(w) === 1 && w.__mock.lastSequence.tag === w.Shell.getStats().tag && w.__mock.lastSequence.steps.length === 0,
+      sentSequences(w) + ' sent, last ' + JSON.stringify(w.__mock.lastSequence));
+    check('unregistered experiment: the saved experiment is the active one once handed over',
+      shell && shell.experiment === 'probe-b' && shell.subdivisions && shell.subdivisions.ghost === '1bar',
+      JSON.stringify(shell));
+    check('unregistered experiment: no errors', w.__mock.errors.length === 0, w.__mock.errors.join(' | '));
+    page.frame.remove();
+
+    // Or until the shown experiment stores a sequence of its own.
+    page = await openSeeded(saved, PLAYING, true);
+    w = page.win;
+    if (!page.ready) { check('unregistered experiment: second page booted', false, 'no boot'); page.frame.remove(); return; }
+    check('unregistered experiment: still untouched when nothing has stored a sequence',
+      sentSequences(w) === 0 && same(w.__mock.lastSequence, PLAYING), sentSequences(w) + ' sent');
+    w.__probe.ctx.midi.setStepSequence([[72]], 100, false);
+    await waitFor(function () { return sentSequences(w) > 0; }, 3000);
+    check('unregistered experiment: the shown experiment storing a sequence hands the sequencer over',
+      sentSequences(w) === 1 && w.__mock.lastSequence.steps.length === 1 && w.__mock.lastSequence.steps[0][0].n === 72 &&
+      w.__mock.lastSequence.tag === w.Shell.getStats().tag,
+      sentSequences(w) + ' sent, last ' + JSON.stringify(w.__mock.lastSequence));
+    chooseOption(findKeySelect(w.document), '7');
+    shell = savedShell(w.__mock);
+    check('unregistered experiment: the saved experiment is the active one after that',
+      shell && shell.experiment === 'probe', JSON.stringify(shell));
+    page.frame.remove();
+  }
+
+  // The per-experiment rates come back from the saved state, and state saved
+  // before they were kept per experiment still gives the active one its rate.
+  async function savedSubdivisionPass() {
+    const page = await openSeeded(
+      { root: 0, scaleName: 'major', octave: 3, subdivision: '1/4', subdivisions: { probe: '1/16' }, experiment: 'probe-b' },
+      null, false);
+    const w = page.win;
+    if (!page.ready) { check('saved subdivisions: page booted', false, 'no boot'); page.frame.remove(); return; }
+    const selector = function () { return findSubdivisionSelect(w.document, '1/4'); };
+    check('saved subdivisions: the active experiment starts at its saved rate',
+      w.Shell.getStats().activeId === 'probe-b' && selector() && selector().value === '1/4',
+      selector() ? selector().value : 'no selector');
+
+    w.Shell.activate('probe');
+    await waitFor(function () { return w.__mock.lastSequence && w.__mock.lastSequence.tag === w.Shell.getStats().tag; }, 3000);
+    await sleep(200);
+    check('saved subdivisions: another experiment gets the rate saved for it',
+      selector() && selector().value === '1/16' && w.__probe.subdivisionAtInit.key === '1/16' &&
+      w.__mock.lastSequence.stepsPerBeat === 4,
+      (selector() ? selector().value : 'no selector') + ' spb=' + w.__mock.lastSequence.stepsPerBeat);
+
+    w.Shell.activate('probe-b');
+    await waitFor(function () { return w.__mock.lastSequence && w.__mock.lastSequence.tag === w.Shell.getStats().tag; }, 3000);
+    await sleep(200);
+    const shell = savedShell(w.__mock);
+    check('saved subdivisions: the first experiment gets back the rate it had, not the fallback',
+      selector() && selector().value === '1/4' && w.__mock.lastSequence.stepsPerBeat === 1 &&
+      shell && shell.subdivisions && shell.subdivisions.probe === '1/16' && shell.subdivisions['probe-b'] === '1/4',
+      (selector() ? selector().value : 'no selector') + ' ' + JSON.stringify(shell));
+    check('saved subdivisions: no errors', w.__mock.errors.length === 0, w.__mock.errors.join(' | '));
+    page.frame.remove();
   }
 
   // ----------------------------------------------------------------------
@@ -310,6 +492,7 @@
     if (isProbe) {
       window.Shell.activate('probe');
       await probeBeforePlay();
+      probeScaleListeners();
     }
 
     // Play at 240 bpm.
@@ -356,6 +539,11 @@
 
     check('no uncaught errors', M.errors.length === 0, M.errors.slice(0, 5).join(' | '));
     check('no contract violations', M.violations.length === 0, M.violations.slice(0, 5).join(' | '));
+
+    if (isProbe && window.parent === window) {
+      await unregisteredExperimentPass();
+      await savedSubdivisionPass();
+    }
 
     if (!params.has('stateDelay') && window.parent === window) await delayedStatePass();
   }

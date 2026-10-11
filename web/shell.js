@@ -197,16 +197,20 @@
 
   // ------------------------------------------------------------------
   // Shell's own persisted state: key/scale/octave/subdivision/active
-  // experiment, under the reserved store key 'shell'. Saved on every
-  // change; applied once at boot.
+  // experiment, under the reserved store key 'shell'. `subdivision` is the
+  // active experiment's value; `subdivisions` holds every experiment's own.
+  // Saved on every change; applied once at boot.
   // ------------------------------------------------------------------
   function saveShellState() {
     shellStore.save({
-      root:        currentRoot,
-      scaleName:   currentScaleName,
-      octave:      currentOctave,
-      subdivision: currentSubdivision,
-      experiment:  activeId
+      root:         currentRoot,
+      scaleName:    currentScaleName,
+      octave:       currentOctave,
+      subdivision:  currentSubdivision,
+      subdivisions: Object.fromEntries(subdivisionByExperiment),
+      // While the sequencer still plays the sequence of an experiment that
+      // did not load, that experiment stays the saved one.
+      experiment:   unclaimedExperiment !== null ? unclaimedExperiment : activeId
     });
   }
 
@@ -216,6 +220,11 @@
       if (SCALES[s.scaleName])                                            currentScaleName = s.scaleName;
       if (typeof s.octave === 'number' && s.octave >= 0 && s.octave <= 7) currentOctave = s.octave;
       if (SUBDIVISIONS[s.subdivision])                                    currentSubdivision = s.subdivision;
+      if (s.subdivisions && typeof s.subdivisions === 'object') {
+        for (const key of Object.keys(s.subdivisions)) {
+          if (SUBDIVISIONS[s.subdivisions[key]]) subdivisionByExperiment.set(key, s.subdivisions[key]);
+        }
+      }
     }
 
     keySelect.value         = String(currentRoot);
@@ -225,8 +234,21 @@
     lastStepIndex = -1;
 
     const wanted = s && typeof s.experiment === 'string' ? s.experiment : null;
-    const id = (wanted && experiments.has(wanted)) ? wanted : experiments.keys().next().value;
-    if (id !== undefined) activate(id);
+    // State saved before subdivisions were kept per experiment only has the
+    // active experiment's value.
+    if (wanted && SUBDIVISIONS[s.subdivision] && !subdivisionByExperiment.has(wanted)) {
+      subdivisionByExperiment.set(wanted, s.subdivision);
+    }
+    const missing = !!wanted && !experiments.has(wanted);
+    const id = (wanted && !missing) ? wanted : experiments.keys().next().value;
+    if (id === undefined) return;
+
+    // The saved experiment did not load (shelved, or its script failed), so
+    // C++ is playing a sequence nothing on this page can reproduce. The first
+    // experiment is shown, but the sequencer stays untouched until the user
+    // switches experiment or the shown one stores a sequence of its own.
+    if (missing) unclaimedExperiment = wanted;
+    activate(id, !missing);
   }
 
   // Nothing is activated or initialised before both halves are in: the saved
@@ -337,6 +359,11 @@
 
   let currentSubdivision = '1/8';
 
+  // The subdivision each quantized experiment last used (id -> key). The
+  // current one is a single global value, so without this an experiment whose
+  // list lacks it would overwrite it for the experiment the user came from.
+  const subdivisionByExperiment = new Map();
+
   function getSubdivision() {
     return { key: currentSubdivision, stepsPerBeat: SUBDIVISIONS[currentSubdivision] };
   }
@@ -348,7 +375,14 @@
       intervals: SCALES[currentScaleName],
       octave:    currentOctave
     };
-    for (const cb of scaleListeners) cb(info);
+    // One failing listener must not keep the others, or the save, from running.
+    for (const cb of scaleListeners) {
+      try {
+        cb(info);
+      } catch (err) {
+        reportCaught(err);
+      }
+    }
     saveShellState();
   }
 
@@ -431,6 +465,15 @@
   const DEFAULT_DURATION   = 150;
   let sequenceDirty = false;
 
+  // Id of the experiment named by the saved state when it is not registered;
+  // null once the sequencer has been handed to an experiment of this page.
+  let unclaimedExperiment = null;
+
+  function handOverSequencer() {
+    sequenceDirty = true;
+    unclaimedExperiment = null;
+  }
+
   function finiteOr(x, fallback) {
     return (typeof x === 'number' && isFinite(x)) ? x : fallback;
   }
@@ -495,9 +538,12 @@
   }
 
   // ------------------------------------------------------------------
-  // Per-experiment MIDI handle. It is inert unless its experiment is the
-  // active one, so a paused experiment cannot make sound; the notes it
-  // holds open are released when it is deactivated.
+  // Per-experiment MIDI handle. Its notes are inert unless its experiment is
+  // the active one, so a paused experiment cannot make sound; the notes it
+  // holds open are released when it is deactivated. A sequence is stored
+  // whether or not the experiment is active (an experiment that rebuilds on
+  // a key change while paused must hand over the rebuilt one on resume) and
+  // only sent while it is.
   // ------------------------------------------------------------------
   function makeMidiHandle(id, entry) {
     const isActive = function () { return activeId === id; };
@@ -534,13 +580,12 @@
       },
 
       setStepSequence(steps, durationMs, legato) {
-        if (!isActive()) return;
         const sequence = normaliseSequence(steps);
         if (sequence === null) return;
         entry.sequence   = sequence;
         entry.durationMs = (typeof durationMs === 'number' && durationMs > 0) ? durationMs : DEFAULT_DURATION;
         entry.legato     = !!legato;
-        sequenceDirty = true;
+        if (isActive()) handOverSequencer();
       }
     };
   }
@@ -630,7 +675,8 @@
     updateSelector();
   }
 
-  function activate(id) {
+  // `handOver: false` leaves the sequencer alone (see applyShellState).
+  function activate(id, handOver = true) {
     // Before boot the saved state has not arrived, so nothing may start.
     if (!booted) { updateSelector(); return; }
     if (!experiments.has(id)) return;
@@ -657,7 +703,9 @@
     divider2.style.display = isQuantized ? '' : 'none';
     subdivisionSelect.style.display = isQuantized ? '' : 'none';
     if (isQuantized) {
-      rebuildSubdivisionOptions(entry.experiment.subdivisions || DEFAULT_SUBDIVISIONS);
+      rebuildSubdivisionOptions(entry.experiment.subdivisions || DEFAULT_SUBDIVISIONS,
+                                subdivisionByExperiment.get(id));
+      subdivisionByExperiment.set(id, currentSubdivision);
     }
 
     // Experiments that span a fixed octave range can opt out of the octave picker
@@ -670,9 +718,9 @@
       callHook(entry.experiment, 'resume');
     }
 
-    // Whatever the new experiment stored during init/resume is handed to the
-    // sequencer at the end of the frame.
-    sequenceDirty = true;
+    // Whatever the new experiment stored is handed to the sequencer at the
+    // end of the frame.
+    if (handOver) handOverSequencer();
 
     updateSelector();
     saveShellState();
@@ -680,8 +728,9 @@
 
   function setSubdivision(key) {
     currentSubdivision = key;
+    if (activeId !== null) subdivisionByExperiment.set(activeId, key);
     lastStepIndex = -1;
-    sequenceDirty = true;
+    handOverSequencer();
     saveShellState();
     if (activeId !== null) {
       callHook(experiments.get(activeId).experiment, 'onSubdivisionChange', getSubdivision());
@@ -793,9 +842,9 @@
   subdivisionSelect.style.display = 'none';
 
   // (Re)populate the subdivision dropdown from a list of SUBDIVISIONS keys.
-  // If the current choice isn't offered, fall back and mark the sequence for
-  // sending so the sequencer doesn't keep a stale rate.
-  function rebuildSubdivisionOptions(allowed) {
+  // The experiment's own last choice (`preferred`) wins if it is offered, then
+  // the current choice; otherwise fall back. The caller sends the sequence.
+  function rebuildSubdivisionOptions(allowed, preferred) {
     while (subdivisionSelect.firstChild) {
       subdivisionSelect.removeChild(subdivisionSelect.firstChild);
     }
@@ -807,10 +856,10 @@
       opt.textContent = SUBDIVISION_DISPLAY[key];
       subdivisionSelect.appendChild(opt);
     }
-    if (allowed.indexOf(currentSubdivision) === -1) {
+    if (preferred !== undefined && allowed.indexOf(preferred) !== -1) {
+      currentSubdivision = preferred;
+    } else if (allowed.indexOf(currentSubdivision) === -1) {
       currentSubdivision = allowed.indexOf('1/8') !== -1 ? '1/8' : allowed[0];
-      lastStepIndex = -1;
-      sequenceDirty = true;
     }
     subdivisionSelect.value = currentSubdivision;
   }

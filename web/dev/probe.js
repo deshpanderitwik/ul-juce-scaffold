@@ -3,10 +3,16 @@
 // optional hook once, and record what happened on window.__probe so the
 // autotest can assert the shell's side of the experiment contract. Needs
 // dev/mock-juce.js (it reads window.__mock). Not bundled into the plugin.
+//
+// probeQuiet=1 in the page URL stops the probe from storing any sequence of
+// its own at init or in the burst, for the autotest cases that check what the
+// shell does with the sequencer when nothing has asked it to hand over.
 // ==========================================================================
 
 (function () {
   'use strict';
+
+  const QUIET = new URLSearchParams(location.search).get('probeQuiet') === '1';
 
   const P = window.__probe = {
     ctx: null,
@@ -25,7 +31,16 @@
     savedByShell: null,
 
     // setStepSequence coalescing
-    burst: { state: 'idle', frame: 0, before: 0, delta: null, lastSteps: null, expectedSteps: 3 },
+    burst: { state: QUIET ? 'skipped' : 'idle', frame: 0, before: 0, delta: null, lastSteps: null, expectedSteps: 3 },
+
+    // scale listeners: a throwing one is subscribed first and must not stop
+    // the recorder behind it
+    armScaleThrow: false,
+    scaleThrows: 0,
+    scaleCalls: [],                // { root, scaleName, octave } per onChange the recorder saw
+
+    // the sequence probe-b writes through probe's handle while probe is paused
+    pausedWrite: { steps: [[71], [72]], durationMs: 90, legato: true },
 
     // sendNote / handle behaviour
     sendNoteDelta: null,
@@ -100,7 +115,17 @@
 
       // --- sequence, canonical and shorthand forms mixed
       this._sequence = [[60, 64], [NOTE(62)], [], [{ n: 67, p: 0.5 }]];
-      ctx.midi.setStepSequence(this._sequence, 120, false);
+      if (!QUIET) ctx.midi.setStepSequence(this._sequence, 120, false);
+
+      // --- scale listeners
+      ctx.scale.onChange(function () {
+        if (!P.armScaleThrow) return;
+        P.scaleThrows++;
+        throw new Error('probe scale listener');
+      });
+      ctx.scale.onChange(function (info) {
+        P.scaleCalls.push({ root: info.root, scaleName: info.scaleName, octave: info.octave });
+      });
 
       // --- note that stays on until the shell releases it on deactivation
       before = msgCount('midi:noteOn');
@@ -227,6 +252,9 @@
     id:          'probe-b',
     name:        'Probe B',
     description: 'Second probe experiment, used for switching',
+    // Narrower than the default list, so switching to it from a rate it does
+    // not offer makes the shell pick another one.
+    subdivisions: ['1/2', '1/4'],
 
     init(ctx) {
       this._ctx = ctx;
@@ -237,7 +265,7 @@
         const before = mock().messages.length;
         stale.sendNoteOn(99);
         stale.sendNote(98, 100, 1, 100);
-        stale.setStepSequence([[1]], 150, false);
+        stale.setStepSequence(P.pausedWrite.steps, P.pausedWrite.durationMs, P.pausedWrite.legato);
         P.staleHandleDelta = mock().messages.length - before;
       }
     },

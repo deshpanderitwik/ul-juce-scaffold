@@ -21,8 +21,19 @@
   const STATE_DELAY_MS   = Math.max(0, Math.min(10000, Number(params.get('stateDelay')) || 0));
   const MESSAGE_LIMIT    = 2000;
 
+  // seed=<json> starts the page from the project state given there instead of
+  // from sessionStorage: { web: { <key>: <json string> }, sequence: <the
+  // setStepSequence payload C++ is already playing> | null }. A seeded page
+  // neither reads nor writes sessionStorage, so the autotest can open
+  // throwaway pages in iframes without disturbing the page that runs it.
+  let seed = null;
+  if (params.has('seed')) {
+    try { seed = JSON.parse(params.get('seed')); } catch (e) { seed = null; }
+    if (seed === null || typeof seed !== 'object') seed = { web: {}, sequence: null };
+  }
+
   // An autotest run must not depend on what an earlier run left behind.
-  if (params.get('autotest') === '1') {
+  if (seed === null && params.get('autotest') === '1') {
     try {
       sessionStorage.removeItem(STORAGE_SAVED);
       sessionStorage.removeItem(STORAGE_SEQUENCE);
@@ -30,6 +41,7 @@
   }
 
   function storageGet(key, fallback) {
+    if (seed !== null) return fallback;
     try {
       const raw = sessionStorage.getItem(key);
       return raw === null ? fallback : JSON.parse(raw);
@@ -39,6 +51,7 @@
   }
 
   function storageSet(key, value) {
+    if (seed !== null) return;
     try { sessionStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
   }
 
@@ -217,9 +230,9 @@
     }
   }
 
-  let saved = storageGet(STORAGE_SAVED, {});
+  let saved = seed !== null ? Object.assign({}, seed.web) : storageGet(STORAGE_SAVED, {});
   if (jsonType(saved) !== 'object') saved = {};
-  let lastSequence = storageGet(STORAGE_SEQUENCE, null);
+  let lastSequence = seed !== null ? (seed.sequence || null) : storageGet(STORAGE_SEQUENCE, null);
   let stateAt = null;          // when the `state` event was delivered
   let idsAtState = null;       // experiments registered at that moment
 
