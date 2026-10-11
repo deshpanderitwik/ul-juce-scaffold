@@ -1,0 +1,158 @@
+{
+  "_about": "Canonical examples of every message that crosses the web view <-> C++ bridge, and of the saved plugin state. The C++ parsers (src/Bridge.cpp, checked by tests/plugin) and the dev harness (web/dev/mock-juce.js) must both agree with this file. Keys starting with _ are commentary.",
+
+  "jsToCpp": {
+    "pageLoaded": {
+      "_notes": "First thing the page sends, once, when the backend is reachable. C++ releases all immediate notes, starts forwarding step events, and replies with one `state` event. Does NOT touch the step sequence.",
+      "examples": [
+        { "name": "boot", "payload": {} }
+      ]
+    },
+
+    "midi": {
+      "_notes": "Immediate (unquantized) notes. One ordered queue. note 0-127, velocity 1-127, channel 1-16. durationMs is only read for type `note` (on now, off after durationMs, timed in C++). All five keys are always present.",
+      "examples": [
+        { "name": "noteOn",      "payload": { "type": "noteOn",      "note": 60, "velocity": 100, "channel": 1, "durationMs": 0 } },
+        { "name": "noteOff",     "payload": { "type": "noteOff",     "note": 60, "velocity": 0,   "channel": 1, "durationMs": 0 } },
+        { "name": "gatedNote",   "payload": { "type": "note",        "note": 67, "velocity": 90,  "channel": 1, "durationMs": 200 } },
+        { "name": "allNotesOff", "payload": { "type": "allNotesOff", "note": 0,  "velocity": 0,   "channel": 1, "durationMs": 0 } }
+      ]
+    },
+
+    "setStepSequence": {
+      "_notes": "Replaces the step sequence. Canonical form: steps is an array of steps, each step an array of notes, each note { n, d, p, v } with all four keys. n = MIDI note 0-127; d = delay as a fraction of one step, 0-0.99; p = hit probability 0-1; v = velocity 1-127. An empty inner array is a silent step. An empty steps array clears the sequence (stepsPerBeat and tag still apply). stepsPerBeat > 0 (0.25 = one step per 4/4 bar, 4 = sixteenths). durationMs > 0 is the gate, capped by C++ at one step. tag is an opaque integer the shell changes every time a different experiment becomes active; C++ echoes it in step events. At most 256 steps of at most 48 notes; anything larger is rejected whole, never truncated.",
+      "examples": [
+        {
+          "name": "singleNotes",
+          "payload": {
+            "steps": [
+              [ { "n": 60, "d": 0, "p": 1, "v": 100 } ],
+              [ { "n": 62, "d": 0, "p": 1, "v": 100 } ],
+              [],
+              [ { "n": 67, "d": 0, "p": 0.5, "v": 80 } ]
+            ],
+            "stepsPerBeat": 2,
+            "durationMs": 150,
+            "legato": false,
+            "tag": 1001
+          },
+          "expect": { "numSteps": 4, "notesPerStep": [1, 1, 0, 1] }
+        },
+        {
+          "name": "phrasedChords",
+          "payload": {
+            "steps": [
+              [ { "n": 48, "d": 0, "p": 1, "v": 100 }, { "n": 55, "d": 0.25, "p": 1, "v": 100 }, { "n": 64, "d": 0.5, "p": 1, "v": 110 } ],
+              [ { "n": 50, "d": 0, "p": 1, "v": 100 }, { "n": 57, "d": 0, "p": 1, "v": 100 } ]
+            ],
+            "stepsPerBeat": 0.25,
+            "durationMs": 60000,
+            "legato": false,
+            "tag": 1002
+          },
+          "expect": { "numSteps": 2, "notesPerStep": [3, 2] }
+        },
+        {
+          "name": "clear",
+          "payload": { "steps": [], "stepsPerBeat": 4, "durationMs": 150, "legato": false, "tag": 1003 },
+          "expect": { "numSteps": 0, "notesPerStep": [] }
+        }
+      ],
+      "lenientExamples": {
+        "_notes": "Shapes the shell never sends but the C++ parser must still accept, because older saved state and older pages used them: a step that is a bare note instead of an array, a note that is a bare int, missing d / p / v (defaults 0 / 1 / 100), and the old key names `notes` (for steps) and `subdivision` (for stepsPerBeat). A missing tag is 0.",
+        "examples": [
+          {
+            "name": "legacyBareInts",
+            "payload": { "notes": [60, 62, 64], "subdivision": 2, "durationMs": 150, "legato": false },
+            "expect": { "numSteps": 3, "notesPerStep": [1, 1, 1] }
+          },
+          {
+            "name": "legacyMixed",
+            "payload": { "notes": [ [60, { "n": 64, "d": 0.3 }], { "n": 67, "p": 0.25 }, [] ], "subdivision": 1, "durationMs": 150 },
+            "expect": { "numSteps": 3, "notesPerStep": [2, 1, 0] }
+          }
+        ]
+      }
+    },
+
+    "saveState": {
+      "_notes": "Persist one experiment's state. key is the experiment id (`shell` is reserved for the shell itself); value is a JSON string. Stored in the processor and saved with the DAW project.",
+      "examples": [
+        { "name": "experiment", "payload": { "key": "chord-builder", "value": "{\"chords\":[[{\"idx\":3,\"delay\":0}]],\"currentChord\":0}" } },
+        { "name": "shell",      "payload": { "key": "shell", "value": "{\"root\":0,\"scaleName\":\"major\",\"octave\":3,\"subdivision\":\"1/8\",\"experiment\":\"graph\"}" } }
+      ]
+    },
+
+    "jsError": {
+      "_notes": "Uncaught page errors, forwarded so they show up in the C++ log. Best effort; never required.",
+      "examples": [
+        { "name": "uncaught", "payload": { "message": "TypeError: x is undefined", "source": "graph.js", "line": 120 } }
+      ]
+    }
+  },
+
+  "cppToJs": {
+    "state": {
+      "_notes": "Reply to pageLoaded. Also re-sent if the host restores plugin state while the page is open, in which case the shell reloads the page. web maps experiment id -> JSON string; it is an empty object when nothing is saved.",
+      "examples": [
+        { "name": "empty",  "payload": { "web": {} } },
+        { "name": "saved",  "payload": { "web": { "shell": "{\"root\":2,\"scaleName\":\"dorian\",\"octave\":3,\"subdivision\":\"1/8\",\"experiment\":\"graph\"}", "graph": "{\"chain\":[0,2,4],\"probs\":[1,1,0.5]}" } } }
+      ]
+    },
+
+    "tick": {
+      "_notes": "Sent about 60 times a second while the editor is open. steps lists the step boundaries the sequencer crossed since the previous tick, in order, and may be empty. For each: i = absolute step number (boundary beat * spb; can be negative during count-in), spb = the stepsPerBeat that boundary was computed at, tag = tag of the sequence in effect, played = MIDI notes that passed the probability dice at that boundary (phrased notes included, since they will sound later in the step). The shell ignores entries whose tag or spb is not current.",
+      "examples": [
+        {
+          "name": "stopped",
+          "payload": { "bpm": 120, "beatPosition": 0, "isPlaying": false, "timeSigNumerator": 4, "timeSigDenominator": 4, "steps": [] }
+        },
+        {
+          "name": "playingOneStep",
+          "payload": {
+            "bpm": 124, "beatPosition": 8.02, "isPlaying": true, "timeSigNumerator": 4, "timeSigDenominator": 4,
+            "steps": [ { "i": 16, "spb": 2, "tag": 1001, "played": [60] } ]
+          }
+        },
+        {
+          "name": "playingSkippedAndChord",
+          "payload": {
+            "bpm": 124, "beatPosition": 9.01, "isPlaying": true, "timeSigNumerator": 4, "timeSigDenominator": 4,
+            "steps": [
+              { "i": 17, "spb": 2, "tag": 1001, "played": [] },
+              { "i": 18, "spb": 2, "tag": 1001, "played": [48, 55, 64] }
+            ]
+          }
+        }
+      ]
+    }
+  },
+
+  "persisted": {
+    "_notes": "What getStateInformation writes (v2) and what setStateInformation must accept (v1 and v2), as UTF-8 JSON. v2 is recognised by v being the integer 2 and web being an object. v1 is a flat object whose values are all JSON strings; it carries no sequence, so a v1 project stays silent until its editor has been opened once. sequence is the last accepted setStepSequence payload, or null; on restore it goes through the same parser as the live message.",
+    "examples": [
+      {
+        "name": "v1",
+        "blob": { "shell": "{\"root\":0,\"scaleName\":\"major\",\"octave\":3,\"subdivision\":\"1/8\",\"experiment\":\"chord-builder\"}", "chord-builder": "{\"chords\":[[3,5]],\"currentChord\":0}" },
+        "expect": { "webKeys": ["chord-builder", "shell"], "hasSequence": false }
+      },
+      {
+        "name": "v2",
+        "blob": {
+          "v": 2,
+          "web": { "shell": "{\"root\":0,\"scaleName\":\"major\",\"octave\":3,\"subdivision\":\"1/8\",\"experiment\":\"graph\"}", "graph": "{\"chain\":[0,2,4],\"probs\":[1,1,1]}" },
+          "sequence": {
+            "steps": [ [ { "n": 60, "d": 0, "p": 1, "v": 100 } ], [ { "n": 64, "d": 0, "p": 1, "v": 100 } ], [ { "n": 67, "d": 0, "p": 1, "v": 100 } ] ],
+            "stepsPerBeat": 2, "durationMs": 150, "legato": false, "tag": 1001
+          }
+        },
+        "expect": { "webKeys": ["graph", "shell"], "hasSequence": true }
+      },
+      {
+        "name": "v2NoSequence",
+        "blob": { "v": 2, "web": {}, "sequence": null },
+        "expect": { "webKeys": [], "hasSequence": false }
+      }
+    ]
+  }
+}
