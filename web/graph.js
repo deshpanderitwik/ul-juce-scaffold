@@ -6,8 +6,6 @@ Shell.register({
   _group: null,
   _context: null,
   _unsubscribeScale: null,
-  _paused: false,
-  _sequenceStale: false,   // scale changed while paused, so the stored sequence holds old notes
   _hoveredIndex: -1,
   _isPressed: false,
   _pressIndex: -1,
@@ -70,10 +68,6 @@ Shell.register({
     // Subscribed only once the saved chain is in place: a scale callback
     // during boot would see the restored chain as stale and wipe it.
     this._unsubscribeScale = context.scale.onChange(() => {
-      // The sequence this experiment handed to the shell holds the old
-      // notes; a paused experiment can't replace it until it resumes.
-      if (this._paused) this._sequenceStale = true;
-
       // Same node count → remap notes in place, preserving the chain.
       // Different scale length → the ring layout itself is stale (node
       // positions and octave split were built for the old length), so tear
@@ -1171,7 +1165,8 @@ Shell.register({
     this._cursor = ((stepIndex % length) + length) % length;
     var node = this._nodes[this._sequence[this._cursor]];
     // Probability is rolled in C++; a skipped step must not look like a hit.
-    if (played.indexOf(node.midiNote) !== -1) {
+    // The shell clamps notes to 0-127 and C++ reports the clamped note.
+    if (played.indexOf(Math.max(0, Math.min(127, node.midiNote))) !== -1) {
       this._popNode(this._sequence[this._cursor]);
     }
   },
@@ -1244,7 +1239,6 @@ Shell.register({
   // The shell keeps paused experiments loaded, so any interaction in
   // progress has to be dropped here rather than resumed later.
   pause() {
-    this._paused = true;
     this._destroyDrag();
     this._isPressed = false;
     this._isDragging = false;
@@ -1256,14 +1250,6 @@ Shell.register({
     this._probNode = -1;
     this._updateProbDisplay();
     this._updateCursor();
-  },
-
-  resume() {
-    this._paused = false;
-    if (this._sequenceStale) {
-      this._sequenceStale = false;
-      this._context.midi.setStepSequence(this._sequenceSteps(), 150);
-    }
   },
 
   destroy() {

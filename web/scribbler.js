@@ -51,6 +51,9 @@ const FoundationsExperiment = {
   },
 
   _rebuild() {
+    // The balls are replaced, so a note held through one has to be released
+    // while its midiNote is still known.
+    this._releaseHeldNotes();
     this._context.util.disposeGroup(this._group);
     this._activeLine = null;
     this._fadingTraces = [];

@@ -63,6 +63,7 @@ const ScaleFlickExperiment = {
   // --- Engines ---
   _rot:       0,         // seq[k] = arp[(k + rot) % len]; saved, see _saveState
   _gateSent:  null,      // gate (ms) of the last grid sequence sent; saved with rot
+  _gateRate:  null,      // steps per beat that gate was computed for; saved with it
   _curIdx:    -1,        // arp position of the most recent hit
   _free:      false,
   _freePhase: 0,
@@ -105,7 +106,10 @@ const ScaleFlickExperiment = {
       self._restoreState(saved);
       self._rebuildBand();
       if (!hasRot) self._restartFromBottom();
-      self._sendSequence(hasRot ? self._gateSent : null);
+      // The saved gate belongs to the rate it was computed for; at another
+      // rate it has to be derived again.
+      var sameRate = self._gateRate === self._stepsPerBeat();
+      self._sendSequence(hasRot && sameRate ? self._gateSent : null);
     });
   },
 
@@ -126,6 +130,7 @@ const ScaleFlickExperiment = {
     }
     if (typeof s.rot === 'number' && isFinite(s.rot)) this._rot = Math.round(s.rot);
     this._gateSent = (typeof s.gate === 'number' && isFinite(s.gate)) ? s.gate : null;
+    this._gateRate = (typeof s.gateRate === 'number' && isFinite(s.gateRate)) ? s.gateRate : null;
   },
 
   // The rotation and gate are saved with the selection: C++ keeps playing the
@@ -138,7 +143,7 @@ const ScaleFlickExperiment = {
     for (var k in this._disabled) if (this._disabled[k]) disabled.push(parseInt(k, 10));
     this._context.store.save({
       selStart: this._selStart, selEnd: this._selEnd, disabled: disabled, rot: this._rot,
-      gate: this._gateSent
+      gate: this._gateSent, gateRate: this._gateRate
     });
   },
 
@@ -338,6 +343,7 @@ const ScaleFlickExperiment = {
     }
     if (typeof gateMs !== 'number') {
       gateMs = this._gateMs(1000 / this._baseHz(this._context.getTransport()));
+      this._gateRate = this._stepsPerBeat();
     }
     this._gateSent = gateMs;
     this._context.midi.setStepSequence(seq, gateMs);

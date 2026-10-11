@@ -29,6 +29,8 @@ const ScratchExperiment = {
   _note:     60,         // C3 in this project's naming (percussion — key-agnostic)
   _velocity: 100,
   _playing:  false,
+  _gateSent: null,       // gate (ms) of the last grid sequence sent; saved with _playing
+  _savedKey: '',         // what the store holds, so only a change is saved
 
   // Rate multiplier vs pull: 1× at center → _maxRatchet at full pull,
   // exponential so the speed-up feels even across the whole travel.
@@ -90,6 +92,19 @@ const ScratchExperiment = {
 
     this._stepMult = context.getSubdivision().stepsPerBeat;
     this._rebuild();
+
+    // C++ keeps playing the pulse while the window is closed, so opening it
+    // has to send that same pulse back: same gate, not one derived from a
+    // tempo the first tick may not have reported yet.
+    var self = this;
+    context.store.load(function (saved) {
+      if (!saved || !saved.playing) return;
+      self._playing = true;
+      self._sendSequence(typeof saved.gate === 'number' && isFinite(saved.gate) ? saved.gate : null);
+      // A save made inside this callback is dropped, so the store still holds
+      // what was loaded.
+      self._savedKey = JSON.stringify({ playing: true, gate: saved.gate });
+    });
   },
 
   _rebuild() {
@@ -180,13 +195,29 @@ const ScratchExperiment = {
   },
 
   // Quantized engine: one note per step, on-grid, run by the C++ sequencer.
-  _sendSequence() {
+  // gateMs overrides the gate derived from the live tempo, so a sequence can
+  // be re-sent exactly as it was last sent.
+  _sendSequence(gateMs) {
     if (!this._playing || this._free) {
       this._context.midi.setStepSequence([], 50);
+      this._saveState();
       return;
     }
-    var stepMs = 1000 / this._baseHz(this._context.getTransport());
-    this._context.midi.setStepSequence([this._note], this._gateMsForPeriod(stepMs));
+    if (typeof gateMs !== 'number') {
+      gateMs = this._gateMsForPeriod(1000 / this._baseHz(this._context.getTransport()));
+    }
+    this._gateSent = gateMs;
+    this._context.midi.setStepSequence([this._note], gateMs);
+    this._saveState();
+  },
+
+  // Every save marks the project modified and this runs on each hand-over,
+  // so only a change in the play state or the gate is written.
+  _saveState() {
+    var key = JSON.stringify({ playing: this._playing, gate: this._playing ? this._gateSent : null });
+    if (key === this._savedKey) return;
+    this._savedKey = key;
+    this._context.store.save({ playing: this._playing, gate: this._playing ? this._gateSent : null });
   },
 
   // Hand off grid → free. Seed the phase from the transport so the first

@@ -880,12 +880,6 @@ const ChordBuilderExperiment = {
     this._updateDotAffordances();
   },
 
-  resume() {
-    // A key or scale change while paused rebuilds the grid, but the midi
-    // handle is inert then, so the shell still holds the old notes.
-    this._sendSequence();
-  },
-
   destroy() {
     if (this._unsubscribeScale) this._unsubscribeScale();
     this._context.util.disposeGroup(this._group);
