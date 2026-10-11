@@ -145,8 +145,102 @@ public:
     const Sequence& sequence() const noexcept;
 
 private:
-    struct Impl;   // replace with real members — this is a placeholder
+    // A note-off waiting for its beat.
+    struct PendingOff
+    {
+        double  beat        = 0.0;
+        uint8_t note        = 60;
+        int     startSample = -1;   // where it started in the block being built; -1 = an earlier block
+    };
+
+    // A phrased (delayed) note-on waiting for its trigger beat.
+    struct PendingOn
+    {
+        double  beat      = 0.0;   // when to trigger
+        double  gateBeats = 0.5;   // note length once triggered
+        uint8_t note      = 60;
+        uint8_t velocity  = 100;
+    };
+
+    // A stretch of one block over which the host beat advances linearly. A
+    // block that crosses a loop end is processed as two of these. Sample
+    // positions are fractional because the wrap rarely falls on a sample.
+    struct Segment
+    {
+        double beatStart      = 0.0;   // host beat at sampleStart
+        double beatEnd        = 0.0;   // exclusive
+        double sampleStart    = 0.0;   // position in the block, in samples
+        double beatsPerSample = 0.0;
+        int    lowestSample   = 0;     // offsets are clamped into this range
+        int    highestSample  = 0;
+    };
+
+    // Splitmix64: tiny, allocation-free, and good enough for dice.
+    double nextDouble() noexcept;
+
+    // Make `incoming` current while the transport plays. With `reconcile`, an
+    // edit that keeps the step mapping is applied to the step that is sounding
+    // right now.
+    void takeSequence (const Sequence& incoming, const BlockInfo& block, bool reconcile,
+                       EventBuffer& out) noexcept;
+
+    // Emit a note-on and remember its note-off. A note whose note-off could not
+    // be remembered is never started, so nothing can be left hanging.
+    void startNote (EventBuffer& out, int sampleOffset, uint8_t note, uint8_t velocity,
+                    double offBeat) noexcept;
+
+    void addPendingOn (double beat, double gateBeats, uint8_t note, uint8_t velocity) noexcept;
+
+    // Note-off for every legato note; any whose note-off does not fit in `out`
+    // stays held so a later pass can release it.
+    void releaseHeld (EventBuffer& out, int sampleOffset) noexcept;
+
+    // Note-offs due in the segment, then the step boundaries inside it, then
+    // the phrased notes that come due.
+    void runSegment (const Segment& segment, const BlockInfo& block, EventBuffer& out,
+                     StepEventBuffer& steps) noexcept;
+
+    void fireStep (int step, double stepSize, double gateBeats, int sampleOffset,
+                   EventBuffer& out, StepEventBuffer& steps) noexcept;
+
+    // After a jump into the middle of a step, sound the step that was skipped.
+    void catchUp (const BlockInfo& block, double beatsPerSample, EventBuffer& out,
+                  StepEventBuffer& steps) noexcept;
+
+    // The beat timeline moved back by one loop length: pending beats follow it.
+    void rebasePending (double loopLength) noexcept;
+
+    // Forget which steps have fired, so that the first boundary at or after
+    // `beat` is the next one.
+    void rebaseStepPosition (double beat) noexcept;
+
     Sequence current;
+
+    std::array<PendingOff, kMaxPending>     pendingOffs {};
+    std::array<PendingOn, kMaxPending>      pendingOns {};
+    std::array<uint8_t, kMaxNotesPerStep>   heldNotes {};   // sustained by legato
+    int      numPendingOffs = 0;
+    int      numPendingOns  = 0;
+    int      numHeld        = 0;
+
+    int      lastStepIndex  = 0;       // last step boundary processed; valid if hasLastStep
+    bool     hasLastStep    = false;
+
+    // The last step struck from a non-empty sequence. This is the step an edit
+    // is reconciled against; it stays put while the sequence is empty, so the
+    // reconciliation never runs against a step that has not been struck.
+    int      chordStepIndex = 0;
+    bool     hasChordStep   = false;
+    bool     wasPlaying     = false;
+    double   expectedBeat   = 0.0;     // where the next block starts if the host plays on
+
+    // The previous block ended at a loop end: if the next one starts at
+    // wrapTarget the host wrapped, and pending beats move back by wrapLength.
+    bool     wrapPending    = false;
+    double   wrapTarget     = 0.0;
+    double   wrapLength     = 0.0;
+
+    uint64_t rngState       = 0x2545F4914F6CDD1DULL;
 };
 
 } // namespace seq
