@@ -39,10 +39,69 @@
   window.addEventListener('resize', handleResize);
 
   // ========================================================================
-  // JUCE bridge — transport state
+  // JUCE bridge — outgoing events and error forwarding
   // ========================================================================
   let backendReady = false;
 
+  function emit(name, payload) {
+    try {
+      if (!backendReady) return;
+      window.__JUCE__.backend.emitEvent(name, payload);
+    } catch (e) {
+      console.warn('Shell: emitEvent(' + name + ') failed', e);
+    }
+  }
+
+  // Uncaught page errors are forwarded so they land in the C++ log. The same
+  // error repeating every frame (a throwing update) is sent once a second,
+  // not sixty times.
+  let lastErrorKey  = '';
+  let lastErrorTime = 0;
+
+  function reportError(message, source, line) {
+    try {
+      const msg = String(message).slice(0, 500);
+      const src = String(source || '').split('/').pop().split('?')[0];
+      const ln  = Math.max(0, Math.floor(Number(line)) || 0);
+      const key = msg + '|' + src + '|' + ln;
+      const now = Date.now();
+      if (key === lastErrorKey && now - lastErrorTime < 1000) return;
+      lastErrorKey  = key;
+      lastErrorTime = now;
+      emit('jsError', { message: msg, source: src, line: ln });
+    } catch (e) { /* the error reporter must never throw */ }
+  }
+
+  window.addEventListener('error', function (e) {
+    reportError(e && e.message, e && e.filename, e && e.lineno);
+  });
+
+  window.addEventListener('unhandledrejection', function (e) {
+    const r = e && e.reason;
+    reportError(r && r.message ? r.message : r, r && (r.sourceURL || r.fileName), r && (r.line || r.lineNumber));
+  });
+
+  // An error thrown by an experiment hook must not take the shell down with
+  // it: log it, forward it, carry on.
+  function reportCaught(err) {
+    console.error(err);
+    reportError(err && err.message ? err.message : err,
+                err && (err.sourceURL || err.fileName),
+                err && (err.line || err.lineNumber));
+  }
+
+  function callHook(experiment, name, ...args) {
+    if (typeof experiment[name] !== 'function') return;
+    try {
+      experiment[name](...args);
+    } catch (err) {
+      reportCaught(err);
+    }
+  }
+
+  // ========================================================================
+  // JUCE bridge — transport state and the C++ step feed
+  // ========================================================================
   const transport = {
     tempo:              120.0,
     beatPosition:       0.0,
@@ -55,51 +114,69 @@
     return transport;
   }
 
-  // ========================================================================
-  // JUCE bridge — MIDI API (immediate / unquantized)
-  // ========================================================================
-  const midi = {
-    _seqNotes: null,
-    _seqDurationMs: 150,
-    _seqLegato: false,
+  // Index of the step the C++ sequencer most recently reported for the
+  // current sequence and rate; -1 when nothing has played since the
+  // transport stopped, the rate changed or another experiment took over.
+  let lastStepIndex = -1;
 
-    sendNoteOn(note, velocity, channel) {
-      if (!backendReady) return;
-      window.__JUCE__.backend.emitEvent('sendMidiEvent', {
-        type: 'noteOn', note, velocity, channel
-      });
-    },
+  // Identifies the sequence C++ is playing. Starts random so a reloaded page
+  // never matches the tag of a sequence left over from before the reload.
+  const MAX_TAG = 0x7fffffff;
+  let tag = 1 + Math.floor(Math.random() * (MAX_TAG - 1));
 
-    sendNoteOff(note, channel) {
-      if (!backendReady) return;
-      window.__JUCE__.backend.emitEvent('sendMidiEvent', {
-        type: 'noteOff', note, velocity: 0, channel
-      });
-    },
+  function onTick(data) {
+    if (!data) return;
+    transport.tempo              = data.bpm              ?? 120.0;
+    transport.beatPosition       = data.beatPosition     ?? 0.0;
+    transport.timeSigNumerator   = data.timeSigNumerator ?? 4;
+    transport.timeSigDenominator = data.timeSigDenominator ?? 4;
+    transport.isPlaying          = data.isPlaying        ?? false;
+    if (!transport.isPlaying) lastStepIndex = -1;
 
-    sendNote(note, velocity, channel, durationMs) {
-      midi.sendNoteOn(note, velocity, channel);
-      setTimeout(() => midi.sendNoteOff(note, channel), durationMs);
-    },
+    const steps = data.steps;
+    if (!Array.isArray(steps) || steps.length === 0) return;
 
-    setStepSequence(notes, durationMs, legato) {
-      midi._seqNotes = notes;
-      midi._seqDurationMs = durationMs || 150;
-      midi._seqLegato = !!legato;
-      midi._sendSequenceToBackend();
-    },
-
-    _sendSequenceToBackend() {
-      if (!backendReady) return;
-      var notes = midi._seqNotes || [];
-      window.__JUCE__.backend.emitEvent('setStepSequence', {
-        notes: notes,
-        subdivision: SUBDIVISIONS[currentSubdivision] || 2,
-        durationMs: midi._seqDurationMs,
-        legato: midi._seqLegato
-      });
+    const spb = SUBDIVISIONS[currentSubdivision];
+    for (let k = 0; k < steps.length; k++) {
+      const s = steps[k];
+      // Steps from a sequence or rate the page no longer shows are stale.
+      if (!s || s.tag !== tag || Math.abs(s.spb - spb) > 1e-9) continue;
+      lastStepIndex = s.i;
+      if (activeId !== null) {
+        callHook(experiments.get(activeId).experiment, 'step', s.i, Array.isArray(s.played) ? s.played : []);
+      }
     }
-  };
+  }
+
+  // ========================================================================
+  // Persistent state — JSON blobs keyed by experiment id, stored in the
+  // processor and saved/restored with the DAW project. The page does not
+  // start any experiment until the first `state` event has arrived (see
+  // boot), so load() is always answered synchronously.
+  // ========================================================================
+  let stateData     = {};     // key → JSON string
+  let stateReceived = false;
+  let scriptsLoaded = false;
+  let booted        = false;
+
+  function parseState(id) {
+    if (typeof stateData[id] !== 'string' || stateData[id] === '') {
+      return null;
+    }
+    try { return JSON.parse(stateData[id]); } catch (e) { return null; }
+  }
+
+  function onState(data) {
+    // The host restored the plugin state while the page was open: whatever
+    // the experiments hold in memory is stale, so start over from it.
+    if (booted) {
+      location.reload();
+      return;
+    }
+    stateData = (data && data.web && typeof data.web === 'object') ? data.web : {};
+    stateReceived = true;
+    boot();
+  }
 
   // ========================================================================
   // JUCE backend initialization
@@ -111,50 +188,18 @@
     }
 
     backendReady = true;
-
-    window.__JUCE__.backend.addEventListener('transportState', function (data) {
-      transport.tempo              = data.bpm              ?? 120.0;
-      transport.beatPosition       = data.beatPosition     ?? 0.0;
-      transport.timeSigNumerator   = data.timeSigNumerator ?? 4;
-      transport.timeSigDenominator = data.timeSigDenominator ?? 4;
-      transport.isPlaying          = data.isPlaying        ?? false;
-      transport.sessionId          = data.sessionId        ?? '';
-    });
-
-    window.__JUCE__.backend.addEventListener('webStateData', function (data) {
-      stateData = data || {};
-      // Shell state first (key/scale/subdivision/active experiment), so
-      // experiment restores that follow see the right grid and rates.
-      applyShellState(parseState('shell'));
-      while (stateWaiters.length) stateWaiters.shift()();
-    });
-    window.__JUCE__.backend.emitEvent('requestState', {});
+    window.__JUCE__.backend.addEventListener('state', onState);
+    window.__JUCE__.backend.addEventListener('tick', onTick);
+    emit('pageLoaded', {});
   }
 
   initBackend();
 
-  // ========================================================================
-  // Persistent state — JSON blobs keyed by experiment id, stored in the
-  // processor and saved/restored with the DAW project. Arrives async after
-  // the backend connects, hence the waiter queue.
-  // ========================================================================
-  let stateData = null;      // key → JSON string, null until webStateData arrives
-  const stateWaiters = [];
-
-  function parseState(id) {
-    if (!stateData || typeof stateData[id] !== 'string' || stateData[id] === '') {
-      return null;
-    }
-    try { return JSON.parse(stateData[id]); } catch (e) { return null; }
-  }
-
   // ------------------------------------------------------------------
   // Shell's own persisted state: key/scale/octave/subdivision/active
   // experiment, under the reserved store key 'shell'. Saved on every
-  // change; applied when the plugin state arrives on load.
+  // change; applied once at boot.
   // ------------------------------------------------------------------
-  let pendingStateExperiment = null;  // experiment to activate once its script loads
-
   function saveShellState() {
     shellStore.save({
       root:        currentRoot,
@@ -166,57 +211,53 @@
   }
 
   function applyShellState(s) {
-    if (!s) return;
-
-    if (typeof s.root === 'number' && s.root >= 0 && s.root < 12) currentRoot = s.root;
-    if (SCALES[s.scaleName])                                      currentScaleName = s.scaleName;
-    if (typeof s.octave === 'number' && s.octave >= 0 && s.octave <= 7) currentOctave = s.octave;
-    if (SUBDIVISIONS[s.subdivision]) {
-      currentSubdivision = s.subdivision;
-      localStorage.setItem('shell.subdivision', currentSubdivision);
-      lastStepIndex = -1;
+    if (s) {
+      if (typeof s.root === 'number' && s.root >= 0 && s.root < 12)       currentRoot = s.root;
+      if (SCALES[s.scaleName])                                            currentScaleName = s.scaleName;
+      if (typeof s.octave === 'number' && s.octave >= 0 && s.octave <= 7) currentOctave = s.octave;
+      if (SUBDIVISIONS[s.subdivision])                                    currentSubdivision = s.subdivision;
     }
 
-    keySelect.value    = String(currentRoot);
-    scaleSelect.value  = currentScaleName;
-    octaveSelect.value = String(currentOctave);
-    notifyScaleChange();
-
-    if (typeof s.experiment === 'string' && s.experiment) {
-      if (experiments.has(s.experiment)) {
-        activate(s.experiment);
-      } else {
-        // Script not loaded yet — loadExperiments() will pick this up.
-        pendingStateExperiment = s.experiment;
-      }
-    }
-
-    // If no activate() ran (same experiment already active), the selector
-    // and sequencer still need the restored subdivision.
+    keySelect.value         = String(currentRoot);
+    scaleSelect.value       = currentScaleName;
+    octaveSelect.value      = String(currentOctave);
     subdivisionSelect.value = currentSubdivision;
-    midi._sendSequenceToBackend();
+    lastStepIndex = -1;
+
+    const wanted = s && typeof s.experiment === 'string' ? s.experiment : null;
+    const id = (wanted && experiments.has(wanted)) ? wanted : experiments.keys().next().value;
+    if (id !== undefined) activate(id);
+  }
+
+  // Nothing is activated or initialised before both halves are in: the saved
+  // state (so no experiment starts from defaults and replaces a sequence C++
+  // is already playing) and the experiment scripts.
+  function boot() {
+    if (booted || !stateReceived || !scriptsLoaded) return;
+    booted = true;
+    shellStore.load(applyShellState);
   }
 
   function makeStore(id) {
+    // Saving before load() has run would overwrite the saved state with
+    // whatever the experiment holds at boot, so it is dropped.
+    let loaded = false;
+
     return {
       // Persist a JSON-serializable value as this experiment's saved state.
       save(value) {
-        if (!backendReady) return;
-        window.__JUCE__.backend.emitEvent('saveState', {
-          key: id,
-          value: JSON.stringify(value)
-        });
+        if (!loaded) return;
+        const json = JSON.stringify(value);
+        if (typeof json !== 'string') return;
+        stateData[id] = json;
+        emit('saveState', { key: id, value: json });
       },
 
-      // Load this experiment's saved state. The callback receives the saved
-      // value, or null if there is none. May fire immediately (state already
-      // arrived) or later (still waiting on the backend).
+      // Load this experiment's saved state. The callback is invoked
+      // synchronously with the saved value, or null if there is none.
       load(callback) {
-        if (stateData !== null) {
-          callback(parseState(id));
-        } else {
-          stateWaiters.push(function () { callback(parseState(id)); });
-        }
+        callback(parseState(id));
+        loaded = true;
       }
     };
   }
@@ -262,11 +303,10 @@
     'blues':            'Blues',
   };
 
-  let currentRoot      = parseInt(localStorage.getItem('shell.root'), 10) || 0;
-  let currentScaleName = localStorage.getItem('shell.scale') || 'major';
-  if (!SCALES[currentScaleName]) currentScaleName = 'major';
-  let currentOctave    = parseInt(localStorage.getItem('shell.octave'), 10);
-  if (isNaN(currentOctave) || currentOctave < 0 || currentOctave > 7) currentOctave = 3;
+  // Defaults until the saved state arrives.
+  let currentRoot      = 0;
+  let currentScaleName = 'major';
+  let currentOctave    = 3;
   const scaleListeners = [];
 
   // ========================================================================
@@ -295,14 +335,13 @@
   // `subdivisions` list.
   const DEFAULT_SUBDIVISIONS = ['1/4', '1/8', '1/8T', '1/16'];
 
-  let currentSubdivision = localStorage.getItem('shell.subdivision') || '1/8';
-  if (!SUBDIVISIONS[currentSubdivision]) currentSubdivision = '1/8';
-  let lastStepIndex = -1;
+  let currentSubdivision = '1/8';
+
+  function getSubdivision() {
+    return { key: currentSubdivision, stepsPerBeat: SUBDIVISIONS[currentSubdivision] };
+  }
 
   function notifyScaleChange() {
-    localStorage.setItem('shell.root', currentRoot);
-    localStorage.setItem('shell.scale', currentScaleName);
-    localStorage.setItem('shell.octave', currentOctave);
     const info = {
       root:      ROOT_NAMES[currentRoot],
       scaleName: currentScaleName,
@@ -378,19 +417,184 @@
   // ========================================================================
   // Experiment lifecycle
   // ========================================================================
-  const experiments = new Map();   // id → { experiment, group, initialized }
+  const experiments = new Map();   // id → { experiment, group, initialized, midi, held, sequence, ... }
   let activeId = null;
 
-  function buildContext(group, id) {
+  // ------------------------------------------------------------------
+  // Step sequence. Each experiment owns the sequence it last stored; only
+  // the active experiment's is ever sent. Sends are coalesced to one per
+  // frame (see flushSequence) so an experiment may call setStepSequence as
+  // often as it likes.
+  // ------------------------------------------------------------------
+  const MAX_STEPS          = 256;
+  const MAX_NOTES_PER_STEP = 48;
+  const DEFAULT_DURATION   = 150;
+  let sequenceDirty = false;
+
+  function finiteOr(x, fallback) {
+    return (typeof x === 'number' && isFinite(x)) ? x : fallback;
+  }
+
+  function clamp(x, lo, hi) {
+    return Math.min(hi, Math.max(lo, x));
+  }
+
+  function normaliseNote(raw) {
+    const o = (typeof raw === 'number') ? { n: raw } : raw;
+    if (!o || typeof o !== 'object' || typeof o.n !== 'number' || !isFinite(o.n)) return null;
+    return {
+      n: clamp(Math.round(o.n), 0, 127),
+      d: clamp(finiteOr(o.d, 0), 0, 0.99),
+      p: clamp(finiteOr(o.p, 1), 0, 1),
+      v: clamp(Math.round(finiteOr(o.v, 100)), 1, 127)
+    };
+  }
+
+  // Canonical form, or null if the sequence is too big. An oversized
+  // sequence is refused rather than truncated: cutting steps off would
+  // change the loop length.
+  function normaliseSequence(steps) {
+    if (steps === null || steps === undefined) steps = [];
+    if (!Array.isArray(steps)) {
+      console.warn('Shell: setStepSequence expects an array of steps');
+      return null;
+    }
+    if (steps.length > MAX_STEPS) {
+      console.warn('Shell: sequence of ' + steps.length + ' steps exceeds ' + MAX_STEPS + '; keeping the previous sequence');
+      return null;
+    }
+    const out = [];
+    for (let i = 0; i < steps.length; i++) {
+      const raw  = steps[i];
+      const list = Array.isArray(raw) ? raw : (raw === null || raw === undefined ? [] : [raw]);
+      if (list.length > MAX_NOTES_PER_STEP) {
+        console.warn('Shell: step ' + i + ' has ' + list.length + ' notes (max ' + MAX_NOTES_PER_STEP + '); keeping the previous sequence');
+        return null;
+      }
+      const step = [];
+      for (let j = 0; j < list.length; j++) {
+        const note = normaliseNote(list[j]);
+        if (note) step.push(note);
+      }
+      out.push(step);
+    }
+    return out;
+  }
+
+  function flushSequence() {
+    if (!sequenceDirty || !booted) return;
+    sequenceDirty = false;
+    const entry = activeId !== null ? experiments.get(activeId) : null;
+    emit('setStepSequence', {
+      steps:        entry && entry.sequence ? entry.sequence : [],
+      stepsPerBeat: SUBDIVISIONS[currentSubdivision],
+      durationMs:   entry ? entry.durationMs : DEFAULT_DURATION,
+      legato:       entry ? entry.legato : false,
+      tag
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Per-experiment MIDI handle. It is inert unless its experiment is the
+  // active one, so a paused experiment cannot make sound; the notes it
+  // holds open are released when it is deactivated.
+  // ------------------------------------------------------------------
+  function makeMidiHandle(id, entry) {
+    const isActive = function () { return activeId === id; };
+
+    return {
+      sendNoteOn(note, velocity = 100, channel = 1) {
+        if (!isActive()) return;
+        const n  = clamp(Math.round(finiteOr(note, 60)), 0, 127);
+        const v  = clamp(Math.round(finiteOr(velocity, 100)), 1, 127);
+        const ch = clamp(Math.round(finiteOr(channel, 1)), 1, 16);
+        entry.held.set(ch + ':' + n, { note: n, channel: ch });
+        emit('midi', { type: 'noteOn', note: n, velocity: v, channel: ch, durationMs: 0 });
+      },
+
+      sendNoteOff(note, channel = 1) {
+        if (!isActive()) return;
+        const n  = clamp(Math.round(finiteOr(note, 60)), 0, 127);
+        const ch = clamp(Math.round(finiteOr(channel, 1)), 1, 16);
+        entry.held.delete(ch + ':' + n);
+        emit('midi', { type: 'noteOff', note: n, velocity: 0, channel: ch, durationMs: 0 });
+      },
+
+      // C++ turns the note off after durationMs; a JS timer would leave the
+      // note stuck if the page went away first.
+      sendNote(note, velocity, channel, durationMs) {
+        if (!isActive()) return;
+        emit('midi', {
+          type:       'note',
+          note:       clamp(Math.round(finiteOr(note, 60)), 0, 127),
+          velocity:   clamp(Math.round(finiteOr(velocity, 100)), 1, 127),
+          channel:    clamp(Math.round(finiteOr(channel, 1)), 1, 16),
+          durationMs: Math.max(1, Math.round(finiteOr(durationMs, DEFAULT_DURATION)))
+        });
+      },
+
+      setStepSequence(steps, durationMs, legato) {
+        if (!isActive()) return;
+        const sequence = normaliseSequence(steps);
+        if (sequence === null) return;
+        entry.sequence   = sequence;
+        entry.durationMs = (typeof durationMs === 'number' && durationMs > 0) ? durationMs : DEFAULT_DURATION;
+        entry.legato     = !!legato;
+        sequenceDirty = true;
+      }
+    };
+  }
+
+  function releaseHeldNotes(entry) {
+    entry.held.forEach(function (h) {
+      emit('midi', { type: 'noteOff', note: h.note, velocity: 0, channel: h.channel, durationMs: 0 });
+    });
+    entry.held.clear();
+  }
+
+  // A closing window must not leave notes sounding.
+  window.addEventListener('pagehide', function () {
+    if (activeId !== null) releaseHeldNotes(experiments.get(activeId));
+  });
+
+  // ------------------------------------------------------------------
+  // Three.js resource helpers handed to experiments
+  // ------------------------------------------------------------------
+  function disposeObject(obj) {
+    if (!obj) return;
+    if (obj.geometry) obj.geometry.dispose();
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of mats) {
+      if (!m) continue;
+      if (m.map) m.map.dispose();
+      m.dispose();
+    }
+  }
+
+  function disposeGroup(group) {
+    if (!group) return;
+    const descendants = [];
+    group.traverse(function (o) { if (o !== group) descendants.push(o); });
+    for (const o of descendants) {
+      disposeObject(o);
+      if (o.parent) o.parent.remove(o);
+    }
+  }
+
+  function buildContext(group, id, entry) {
     return {
       scene:        group,       // THREE.Group — experiment adds meshes here
       camera,                    // read-only reference
       renderer,                  // read-only reference
-      midi,
+      midi:         entry.midi,  // per-experiment handle
       scale,
       store:        makeStore(id),  // per-experiment persistent state
       getTransport,
-      getSize
+      getSize,
+      getSubdivision,
+      getStepIndex() { return lastStepIndex; },
+      setCursor(css) { if (activeId === id) canvas.style.cursor = css || ''; },
+      util:         { disposeObject, disposeGroup }
     };
   }
 
@@ -405,11 +609,17 @@
       return;
     }
     const experiment = Object.assign({ name: id, description: '' }, behavior);
-    experiments.set(id, {
+    const entry = {
       experiment,
       group:       new THREE.Group(),
-      initialized: false
-    });
+      initialized: false,
+      held:        new Map(),       // notes turned on with sendNoteOn and not yet off
+      sequence:    null,            // canonical steps, or null if never set
+      durationMs:  DEFAULT_DURATION,
+      legato:      false
+    };
+    entry.midi = makeMidiHandle(id, entry);
+    experiments.set(id, entry);
 
     // Append to the experiment selector dropdown
     const opt = document.createElement('option');
@@ -421,6 +631,8 @@
   }
 
   function activate(id) {
+    // Before boot the saved state has not arrived, so nothing may start.
+    if (!booted) { updateSelector(); return; }
     if (!experiments.has(id)) return;
     if (activeId === id) return;
 
@@ -428,21 +640,17 @@
     if (activeId !== null) {
       const current = experiments.get(activeId);
       scene.remove(current.group);
-      if (current.experiment.pause) current.experiment.pause();
+      callHook(current.experiment, 'pause');
+      releaseHeldNotes(current);
+      canvas.style.cursor = '';
     }
 
     // Activate the new experiment
     const entry = experiments.get(id);
     activeId = id;
-    localStorage.setItem('shell.experiment', id);
+    tag = (tag % MAX_TAG) + 1;
+    lastStepIndex = -1;
     scene.add(entry.group);
-
-    if (!entry.initialized) {
-      entry.initialized = true;
-      entry.experiment.init(buildContext(entry.group, id));
-    } else {
-      if (entry.experiment.resume) entry.experiment.resume();
-    }
 
     // Show/hide subdivision selector based on whether experiment is quantized
     var isQuantized = typeof entry.experiment.step === 'function';
@@ -451,17 +659,49 @@
     if (isQuantized) {
       rebuildSubdivisionOptions(entry.experiment.subdivisions || DEFAULT_SUBDIVISIONS);
     }
-    lastStepIndex = -1;
 
     // Experiments that span a fixed octave range can opt out of the octave picker
     octaveSelect.style.display = entry.experiment.showOctave === false ? 'none' : '';
+
+    if (!entry.initialized) {
+      entry.initialized = true;
+      callHook(entry.experiment, 'init', buildContext(entry.group, id, entry));
+    } else {
+      callHook(entry.experiment, 'resume');
+    }
+
+    // Whatever the new experiment stored during init/resume is handed to the
+    // sequencer at the end of the frame.
+    sequenceDirty = true;
 
     updateSelector();
     saveShellState();
   }
 
+  function setSubdivision(key) {
+    currentSubdivision = key;
+    lastStepIndex = -1;
+    sequenceDirty = true;
+    saveShellState();
+    if (activeId !== null) {
+      callHook(experiments.get(activeId).experiment, 'onSubdivisionChange', getSubdivision());
+    }
+  }
+
   // Expose to global scope so experiment scripts can call Shell.register()
-  window.Shell = { register, activate };
+  window.Shell = {
+    register,
+    activate,
+    getStats() {
+      return {
+        frames:   frameCount,
+        activeId,
+        ids:      Array.from(experiments.keys()),
+        tag,
+        booted
+      };
+    }
+  };
 
   // ========================================================================
   // Top bar UI — experiment selector + key/scale selectors
@@ -553,8 +793,8 @@
   subdivisionSelect.style.display = 'none';
 
   // (Re)populate the subdivision dropdown from a list of SUBDIVISIONS keys.
-  // If the current choice isn't offered, fall back and push the corrected
-  // multiplier to the backend so the sequencer doesn't keep a stale rate.
+  // If the current choice isn't offered, fall back and mark the sequence for
+  // sending so the sequencer doesn't keep a stale rate.
   function rebuildSubdivisionOptions(allowed) {
     while (subdivisionSelect.firstChild) {
       subdivisionSelect.removeChild(subdivisionSelect.firstChild);
@@ -569,9 +809,8 @@
     }
     if (allowed.indexOf(currentSubdivision) === -1) {
       currentSubdivision = allowed.indexOf('1/8') !== -1 ? '1/8' : allowed[0];
-      localStorage.setItem('shell.subdivision', currentSubdivision);
       lastStepIndex = -1;
-      midi._sendSequenceToBackend();
+      sequenceDirty = true;
     }
     subdivisionSelect.value = currentSubdivision;
   }
@@ -581,11 +820,7 @@
   // back to '1/8' before the experiment that supports it gets a say.
 
   subdivisionSelect.addEventListener('change', function () {
-    currentSubdivision = subdivisionSelect.value;
-    localStorage.setItem('shell.subdivision', currentSubdivision);
-    lastStepIndex = -1;
-    midi._sendSequenceToBackend();
-    saveShellState();
+    setSubdivision(subdivisionSelect.value);
   });
   topBar.appendChild(subdivisionSelect);
 
@@ -618,6 +853,31 @@
   }
 
   // ========================================================================
+  // Pointer input — forwarded to the active experiment in world
+  // coordinates (origin bottom-left, like the camera).
+  // ========================================================================
+  function forwardPointer(hook, e) {
+    if (activeId === null) return;
+    const experiment = experiments.get(activeId).experiment;
+    if (typeof experiment[hook] !== 'function') return;
+    const rect = canvas.getBoundingClientRect();
+    experiment[hook]({
+      x: e.clientX - rect.left,
+      y: rect.height - (e.clientY - rect.top)
+    }, e);
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    // Capture keeps a drag reporting over the top bar and outside the canvas.
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic or already-gone pointer */ }
+    forwardPointer('onPointerDown', e);
+  });
+  canvas.addEventListener('pointermove',   function (e) { forwardPointer('onPointerMove', e); });
+  canvas.addEventListener('pointerup',     function (e) { forwardPointer('onPointerUp', e); });
+  canvas.addEventListener('pointercancel', function (e) { forwardPointer('onPointerCancel', e); });
+  canvas.addEventListener('dblclick',      function (e) { forwardPointer('onDoubleClick', e); });
+
+  // ========================================================================
   // Animation loop
   // ========================================================================
   const clock = new THREE.Clock();
@@ -629,12 +889,16 @@
     if (!document.hidden) clock.getDelta();
   });
 
+  let frameCount = 0;
+
   function animate() {
     requestAnimationFrame(animate);
+    frameCount++;
     const delta = clock.getDelta();
     const tp    = getTransport();
 
-    // Quantized step detection + transport dimming
+    // Transport dimming for quantized experiments. Which step played comes
+    // from the C++ sequencer (see onTick), not from the transport position.
     if (activeId !== null) {
       const entry = experiments.get(activeId);
       if (typeof entry.experiment.step === 'function') {
@@ -642,17 +906,6 @@
         var current   = entry.group.userData.dimFactor ?? 1.0;
         var next      = current + (dimTarget - current) * Math.min(1, delta * 8);
         entry.group.userData.dimFactor = next;
-
-        if (tp.isPlaying) {
-          const multiplier = SUBDIVISIONS[currentSubdivision] || 2;
-          const currentStep = Math.floor(tp.beatPosition * multiplier);
-          if (currentStep !== lastStepIndex) {
-            lastStepIndex = currentStep;
-            entry.experiment.step(currentStep);
-          }
-        } else {
-          lastStepIndex = -1;
-        }
       }
     }
 
@@ -660,10 +913,15 @@
     if (activeId !== null) {
       const entry = experiments.get(activeId);
       if (entry.experiment.update) {
-        entry.experiment.update(delta, tp);
+        try {
+          entry.experiment.update(delta, tp);
+        } catch (err) {
+          reportCaught(err);
+        }
       }
     }
 
+    flushSequence();
     renderer.render(scene, camera);
   }
   animate();
@@ -685,20 +943,15 @@
   }
 
   (function loadExperiments() {
+    const cfg   = window.SHELL_CONFIG;
+    const files = (cfg && Array.isArray(cfg.experimentFiles)) ? cfg.experimentFiles : EXPERIMENT_FILES;
     let chain = Promise.resolve();
-    for (const file of EXPERIMENT_FILES) {
+    for (const file of files) {
       chain = chain.then(() => loadScript(file));
     }
     chain.then(() => {
-      if (experiments.size === 0 || activeId !== null) return;
-      // Plugin-state restore (if it arrived before the scripts finished
-      // loading) wins over the localStorage fallback.
-      const fromState = pendingStateExperiment;
-      const saved = (fromState && experiments.has(fromState))
-        ? fromState
-        : localStorage.getItem('shell.experiment');
-      const id = (saved && experiments.has(saved)) ? saved : experiments.keys().next().value;
-      activate(id);
+      scriptsLoaded = true;
+      boot();
     });
   })();
 

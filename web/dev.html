@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JuceScaffold dev</title>
+<style>
+  * { margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+  canvas { display: block; }
+  #autotest-result {
+    position: fixed; left: 8px; top: 56px; z-index: 300; max-width: 60vw; max-height: 70vh;
+    overflow: auto; padding: 6px 8px; border-radius: 8px; background: rgba(0,0,0,0.7);
+    color: #bbb; font: 10px/1.35 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<!--
+  Browser harness: the same page as index.html, with a mock JUCE backend.
+  Query parameters:
+    only=<id>   load just <id>.js
+    all=1       load all seven experiment files, hidden ones included
+    probe=1     load just dev/probe.js
+    panel=0     hide the control panel
+    autotest=1  run the self-test and write the result into #autotest-result
+-->
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var all = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js',
+               'scratch.js', 'random-walker.js', 'scale-flick.js'];
+    var files = null;
+    if (q.get('probe') === '1') {
+      files = ['dev/probe.js'];
+    } else if (q.get('all') === '1') {
+      files = all;
+    } else if (q.get('only') && /^[a-z0-9-]+$/i.test(q.get('only'))) {
+      files = [q.get('only') + '.js'];
+    }
+    if (q.get('autotest') === '1') {
+      // The spy goes first so it can see every experiment register.
+      files = ['dev/spy.js'].concat(files || ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js']);
+    }
+    if (files) window.SHELL_CONFIG = { experimentFiles: files };
+  })();
+</script>
+<script src="three.min.js"></script>
+<script src="dev/mock-juce.js"></script>
+<script src="shell.js"></script>
+<script>
+  if (new URLSearchParams(location.search).get('autotest') === '1') {
+    var s = document.createElement('script');
+    s.src = 'dev/autotest.js';
+    document.body.appendChild(s);
+  }
+</script>
+</body>
+</html>
