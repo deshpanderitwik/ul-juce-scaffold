@@ -134,6 +134,7 @@ Build plugin + tests:      cmake -B build && cmake --build build -j8
 Run all tests:             ctest --test-dir build --output-on-failure
 Fast sequencer tests only: cmake -S tests/core -B build-core && cmake --build build-core && ctest --test-dir build-core --output-on-failure
 Check JS syntax:           node --check web/<file>.js     (there is no other JS tooling)
+Deeper sequencer fuzz:     SEQ_DIFF_SEEDS=12000 SEQ_INVARIANT_SEEDS=40000 ./build-core/ScaffoldCoreTests     (about 4 minutes; run it after changing StepSequencer, the default seed count has missed a real bug)
 Browser harness:           serve the repo root (python3 -m http.server <port>) and open /web/dev.html
 ```
 

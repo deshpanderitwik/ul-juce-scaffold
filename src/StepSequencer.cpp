@@ -115,7 +115,8 @@ namespace
                 const StepNote& m = x.notes[idx (j)];
                 const StepNote& n = y.notes[idx (j)];
 
-                if (! sameValue (m.delay, n.delay) || m.probability != n.probability
+                if (! sameValue (m.delay, n.delay)
+                    || ! sameValue (static_cast<double> (m.probability), static_cast<double> (n.probability))
                     || m.note != n.note || m.velocity != n.velocity)
                     return false;
             }
@@ -236,6 +237,22 @@ void StepSequencer::addPendingOn (double beat, double offBeat, uint8_t note, uin
         return;   // not sounding yet, so dropping it leaves nothing hanging
 
     pendingOns[idx (numPendingOns++)] = { beat, offBeat, note, velocity };
+}
+
+void StepSequencer::endPending (EventBuffer& out, int sampleOffset, uint8_t note) noexcept
+{
+    int kept = 0;
+    for (int i = 0; i < numPendingOffs; ++i)
+    {
+        const PendingOff off = pendingOffs[idx (i)];
+
+        // One that started later in this block cannot be ended yet, and one
+        // whose note-off does not fit stays pending rather than hanging.
+        if (! (off.note == note && off.startSample <= sampleOffset
+               && out.push (makeNoteOff (sampleOffset, note))))
+            pendingOffs[idx (kept++)] = off;
+    }
+    numPendingOffs = kept;
 }
 
 void StepSequencer::releaseHeld (EventBuffer& out, int sampleOffset) noexcept
@@ -425,9 +442,16 @@ void StepSequencer::fireStep (int step, double stepSize, double gateBeats, int s
                     if (heldNotes[idx (h)] == sn.note)
                         isHeld = true;
 
-                if (! isHeld && numHeld < kMaxNotesPerStep
-                    && out.push (makeNoteOn (sampleOffset, sn.note, sn.velocity)))
-                    heldNotes[idx (numHeld++)] = sn.note;
+                if (! isHeld && numHeld < kMaxNotesPerStep)
+                {
+                    // A gated note from before legato was switched on may
+                    // still hold this pitch; its note-off would otherwise
+                    // land inside the note the chord is about to hold.
+                    endPending (out, sampleOffset, sn.note);
+
+                    if (out.push (makeNoteOn (sampleOffset, sn.note, sn.velocity)))
+                        heldNotes[idx (numHeld++)] = sn.note;
+                }
 
                 event.played[idx (event.numPlayed++)] = sn.note;
             }

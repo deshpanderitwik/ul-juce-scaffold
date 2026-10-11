@@ -198,6 +198,11 @@ private:
 
     void addPendingOn (double beat, double offBeat, uint8_t note, uint8_t velocity) noexcept;
 
+    // Note-off, at `sampleOffset`, for every gated instance of `note` that is
+    // still waiting for its own. For a strike that does not go through
+    // startNote (a legato chord taking over a pitch a gated note still holds).
+    void endPending (EventBuffer& out, int sampleOffset, uint8_t note) noexcept;
+
     // Note-off for every legato note; any whose note-off does not fit in `out`
     // stays held so a later pass can release it.
     void releaseHeld (EventBuffer& out, int sampleOffset) noexcept;

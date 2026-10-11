@@ -345,3 +345,40 @@ TEST (sequencer_a_gate_carried_across_the_wrap_ends_where_the_loop_start_strikes
             CHECK (downbeats >= 3);
         });
 }
+
+// A legato chord takes over a pitch that a gated note from before legato was
+// switched on still holds. The gated note has to end where the chord strikes;
+// left alone, its note-off lands inside the note the chord is holding and
+// silences it for as long as the chord lasts.
+TEST (sequencer_a_legato_strike_ends_a_gated_note_still_holding_its_pitch)
+{
+    atBlockSizes ([] (int size)
+    {
+        Host host;   // 48 kHz at 120 bpm: 24000 samples per beat
+
+        // Phrased half a step late with a gate of 0.7 step: struck at beat 0.5,
+        // due to end at beat 1.2, well inside the chord that strikes at beat 1.
+        const auto plain  = build (1.0, 350.0, { { N (58, 0.5) }, {} });
+        const auto legato = build (1.0, 350.0, { { N (58) }, { N (58) } }, true);
+
+        host.run (size, true, plain.get());
+        host.play (18000 - size, size);          // the phrased note has struck
+        host.run (size, true, legato.get());     // mid-step, before beat 1
+        host.play (24000, size);
+        host.stop();
+
+        const auto ons  = host.times (58, true);
+        const auto offs = host.times (58, false);
+        REQUIRE (ons.size() == 2);
+        REQUIRE (offs.size() == 2);
+
+        CHECK (near (ons[0], 12000));
+        CHECK (near (ons[1], 24000));
+        CHECK_EQ (offs[0], ons[1]);              // ended by the strike, not at beat 1.2
+        CHECK (offs[1] > 36000);                 // held until the transport stops
+
+        const auto why = notAlternating (eventsOf (host.log, 58));
+        if (! why.empty())
+            check::fail (__FILE__, __LINE__, why);
+    });
+}
