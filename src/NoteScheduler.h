@@ -55,8 +55,37 @@ public:
     bool anyHeld() const noexcept;
 
 private:
-    struct Impl;   // replace with real members — this is a placeholder
+    static constexpr int kNumChannels = 16;
+    static constexpr int kNumNotes    = 128;
+    static constexpr int kNumSlots    = kNumChannels * kNumNotes;
+
+    enum class State : uint8_t
+    {
+        Off,
+        Held,     // sounding until a note-off arrives
+        Gated     // sounding until `remaining` samples have gone by
+    };
+
+    static constexpr int slotFor (int channel, int note) noexcept
+    {
+        return (channel - 1) * kNumNotes + note;
+    }
+
+    static constexpr int channelOf (int slot) noexcept   { return slot / kNumNotes + 1; }
+    static constexpr int noteOf (int slot) noexcept      { return slot % kNumNotes; }
+
+    // Note-off for one slot. If `out` is full the slot becomes a gate that has
+    // already run out, so the next advance() sends the note-off instead of the
+    // note staying on for good.
+    bool release (int slot, EventBuffer& out, int sampleOffset) noexcept;
+
+    int gateInSamples (float durationMs) const noexcept;
+
     double sampleRate = 44100.0;
+    int    numOn      = 0;
+
+    std::array<State, kNumSlots>   state {};
+    std::array<int, kNumSlots>     remaining {};
 };
 
 } // namespace seq

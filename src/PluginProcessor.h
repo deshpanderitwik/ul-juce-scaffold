@@ -1,11 +1,14 @@
 #pragma once
 
+#include "NoteScheduler.h"
+#include "StepSequencer.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_core/juce_core.h>
+#include <juce_events/juce_events.h>
 #include <array>
 #include <atomic>
 #include <map>
-#include <vector>
+#include <memory>
 
 // =============================================================================
 // Transport state — written on the AUDIO thread, read on the MESSAGE thread.
@@ -22,73 +25,16 @@ struct TransportState
 };
 
 // =============================================================================
-// A single MIDI event from the web view.
-// Pushed by the message thread, consumed by the audio thread.
-// =============================================================================
-struct MidiEventData
-{
-    enum Type { NoteOn, NoteOff };
-
-    Type type     = NoteOn;
-    int  note     = 60;
-    int  velocity = 127;
-    int  channel  = 1;
-};
-
-// =============================================================================
-// Step sequence state — written on the MESSAGE thread, read on the AUDIO thread.
-// Protected by a SpinLock (brief hold times, no allocation under lock).
-// =============================================================================
-// A note within a step. delay phrases the note later into its step: it
-// triggers at boundary + delay * stepSize (0 = exactly on the boundary).
-// probability gates each hit: 1 always plays, 0 never, in between the
-// dice are rolled fresh every time the step comes around.
-struct StepNote
-{
-    int    note        = 60;
-    double delay       = 0.0;   // fraction of one step, [0, 1)
-    double probability = 1.0;   // chance this note triggers, [0, 1]
-};
-
-struct StepSequenceState
-{
-    // One entry per step; each step holds the notes to trigger together.
-    // A single-note step is a one-element vector; an empty vector is a
-    // silent step (keeps its slot in the cycle).
-    std::vector<std::vector<StepNote>> steps;
-
-    // Steps per beat. May be fractional: 0.5 = half-note steps, 0.25 = one
-    // step per 4/4 bar.
-    double subdivisionMultiplier = 2.0;
-    double noteDurationMs        = 150.0;
-
-    // Legato mode: notes sustain across step boundaries. At each boundary
-    // only the diff is sent — notes leaving the chord get note-offs, notes
-    // entering get note-ons, notes present in both keep ringing.
-    // noteDurationMs and per-note delays are ignored in this mode.
-    bool legato = false;
-};
-
-struct PendingNoteOff
-{
-    int    note         = 60;
-    int    channel      = 1;
-    double beatPosition = 0.0;
-};
-
-// A phrased (delayed) note waiting for its trigger beat.
-struct PendingNoteOn
-{
-    int    note         = 60;
-    int    channel      = 1;
-    double beatPosition = 0.0;   // when to trigger
-    double gateBeats    = 0.5;   // note length once triggered
-};
-
-// =============================================================================
 // The AudioProcessor — our thin host layer.
+//
+// The step sequence plays from here, not from the page: it is saved with the
+// project and restored into the audio thread by setStateInformation, so a
+// reopened project sounds without the editor ever having been opened. The
+// editor only mirrors what the sequencer did (step events) and feeds it new
+// sequences and immediate notes.
 // =============================================================================
-class PluginProcessor : public juce::AudioProcessor
+class PluginProcessor : public juce::AudioProcessor,
+                        public juce::ChangeBroadcaster
 {
 public:
     PluginProcessor();
@@ -98,6 +44,7 @@ public:
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
     // --- Editor ---
@@ -118,59 +65,102 @@ public:
     const juce::String getProgramName (int index) override;
     void changeProgramName (int index, const juce::String& newName) override;
 
-    // --- State persistence (empty for now) ---
+    // --- State persistence ---
+    // The saved project holds the web state and the last step sequence the
+    // page sent (see bridge::PluginState). The host may call these from any
+    // non-audio thread. After a restore the processor sends a change message
+    // so an open editor can hand the new web state to its page.
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     // ==========================================================================
-    // Our custom interface
+    // Our custom interface (MESSAGE thread unless noted)
     // ==========================================================================
 
-    // Call from the MESSAGE thread to enqueue a MIDI event for the audio thread.
-    void pushMidiEvent (const MidiEventData& event);
+    // Immediate (unquantized) notes. One ordered queue; if it is full a NoteOn
+    // is dropped, and anything else makes the audio thread release every note,
+    // because a lost note-off would leave a note stuck.
+    void pushImmediate (const seq::ImmediateEvent& event);
 
-    // Call from the MESSAGE thread to update the step sequence.
-    void setStepSequence (std::vector<std::vector<StepNote>> steps, double multiplier, double durationMs, bool legato);
+    // Parses a `setStepSequence` payload and hands it to the audio thread.
+    // Returns false, changing nothing, if the payload is not valid.
+    bool setStepSequence (const juce::var& payload);
 
     // --- Web state ---
-    // Arbitrary JSON blobs keyed by experiment id, round-tripped through
-    // get/setStateInformation so they persist in the DAW project (and
-    // survive the editor being closed and reopened). The host may call the
-    // state callbacks from any thread, so access is locked.
+    // Arbitrary JSON blobs keyed by experiment id, saved with the project.
+    // Marks the project as modified in the host.
     void setWebState (const juce::String& key, const juce::String& json);
-    juce::var getWebStateAsVar() const;   // { key: jsonString, ... }
+    std::map<juce::String, juce::String> getWebState() const;
+
+    // --- Page / editor lifecycle ---
+    // The page (re)loaded: whatever it had sounding is gone, so release it.
+    // The step sequence is left alone.
+    void pageLoaded();
+
+    // The editor wants step events. Whatever is still queued from an earlier
+    // editor is discarded.
+    void editorAttached();
+
+    // The editor is closing: stop queueing step events and release the notes
+    // the page may have been holding. The step sequence keeps playing.
+    void editorDetached();
+
+    // Moves up to maxEvents step events, oldest first, into dest.
+    int popStepEvents (seq::StepEvent* dest, int maxEvents);
 
     // Readable from any thread (each field is atomic).
-    TransportState transportState;
+    TransportState transport;
 
-    // Unique per DAW session — generated once in the constructor.
-    const juce::String sessionId { juce::Uuid().toString() };
+    static constexpr int kImmediateQueueCapacity = 256;
+    static constexpr int kStepQueueCapacity      = 128;
 
 private:
-    // Lock-free MIDI queue: single-producer (message thread), single-consumer (audio thread)
-    static constexpr int kMidiQueueCapacity = 256;
-    juce::AbstractFifo                            midiFifo  { kMidiQueueCapacity };
-    std::array<MidiEventData, kMidiQueueCapacity> midiQueue;
+    // Fills the block description from the host playhead and publishes the
+    // transport to the UI.
+    void readPlayhead (seq::BlockInfo& block);
 
-    // Step sequencer state (message thread writes, audio thread reads)
-    juce::SpinLock         sequenceLock;
-    StepSequenceState      sequenceState;
-    std::atomic<bool>      sequenceDirty { false };
-    StepSequenceState      audioSequence;   // audio-thread copy, refreshed only when dirty
-    int                    lastStepIndex = -1;
-    bool                   wasPlaying    = false;
-    std::vector<PendingNoteOff> pendingNoteOffs;
-    std::vector<PendingNoteOn>  pendingNoteOns;   // phrased notes awaiting their beat
-    std::vector<int>       heldNotes;   // notes currently sustained by legato mode
+    void drainImmediateQueue();
+
+    // Message side of the sequence hand-off. Caller holds stateLock.
+    void publishSequence (const seq::Sequence& sequence);
+
+    // Sequence hand-off: the message thread fills `pending` under the spin lock
+    // and sets the dirty flag; the audio thread copies it into `staging` with a
+    // try-lock and passes that to the sequencer. A Sequence is ~200 KB, so all
+    // three live on the heap, allocated here and never on the audio thread.
+    std::unique_ptr<seq::Sequence> scratch  { std::make_unique<seq::Sequence>() };
+    std::unique_ptr<seq::Sequence> pending  { std::make_unique<seq::Sequence>() };
+    std::unique_ptr<seq::Sequence> staging  { std::make_unique<seq::Sequence>() };
+    juce::SpinLock                 sequenceLock;
+    std::atomic<bool>              sequenceDirty { false };
+
+    seq::StepSequencer  sequencer;
+    seq::NoteScheduler  scheduler;
+    seq::EventBuffer    events;
+    seq::StepEventBuffer stepEvents;
+
+    // Immediate notes: message thread -> audio thread.
+    juce::AbstractFifo                                          immediateFifo { kImmediateQueueCapacity };
+    std::array<seq::ImmediateEvent, kImmediateQueueCapacity>    immediateQueue;
+    std::atomic<bool>                                           panic { false };
+
+    // Step events: audio thread -> editor timer. Only filled while an editor
+    // is attached, and dropped when full.
+    juce::AbstractFifo                                          stepFifo { kStepQueueCapacity };
+    std::array<seq::StepEvent, kStepQueueCapacity>              stepQueue;
+    std::atomic<bool>                                           editorIsAttached { false };
+
+    // prepareToPlay cannot emit MIDI and releaseResources cannot either, so
+    // the first block after a prepare starts by ending whatever was sounding.
+    std::atomic<bool>   releaseOnNextBlock { true };
 
     double currentSampleRate = 44100.0;
-    double lastBeatPos       = 0.0;
 
-    juce::Random random;   // audio-thread dice for note probability
-
-    // Web state store (see setWebState)
+    // Saved state. stateLock also serialises the message-side sequence path,
+    // since the host may call setStateInformation from a thread of its own.
     mutable juce::CriticalSection stateLock;
     std::map<juce::String, juce::String> webState;
+    juce::var lastSequence;   // the last accepted setStepSequence payload
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };

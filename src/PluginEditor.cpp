@@ -1,4 +1,6 @@
 #include "PluginEditor.h"
+#include "Bridge.h"
+#include "ScaffoldConfig.h"
 #include "BinaryData.h"
 
 // =============================================================================
@@ -37,89 +39,35 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc, PluginEditor& editor)
         .withKeepPageLoadedWhenBrowserIsHidden()
         .withNativeIntegrationEnabled()
 
-        // ---- JS → C++ : receive MIDI events from the web view ---------------
-        .withEventListener ("sendMidiEvent", [&proc] (const juce::var& payload)
+        // ---- JS → C++ : the page is up and listening --------------------------
+        // Whatever the previous page had sounding is gone with it, so release
+        // it. The step sequence is not touched: it plays whether or not a page
+        // exists.
+        .withEventListener ("pageLoaded", [&proc, &editor] (const juce::var&)
         {
-            MidiEventData evt;
-
-            auto typeStr = payload["type"].toString();
-
-            if (typeStr == "noteOn")
-                evt.type = MidiEventData::NoteOn;
-            else if (typeStr == "noteOff")
-                evt.type = MidiEventData::NoteOff;
-            else
-                return;
-
-            evt.note     = static_cast<int> (payload["note"]);
-            evt.velocity = static_cast<int> (payload["velocity"]);
-            evt.channel  = static_cast<int> (payload["channel"]);
-
-            proc.pushMidiEvent (evt);
+            proc.pageLoaded();
+            proc.editorAttached();
+            editor.pageIsLoaded = true;
+            editor.sendState();
         })
 
-        // ---- JS → C++ : receive step sequence updates -----------------------
+        // ---- JS → C++ : immediate notes ---------------------------------------
+        .withEventListener ("midi", [&proc] (const juce::var& payload)
+        {
+            seq::ImmediateEvent event;
+
+            if (bridge::parseMidi (payload, event))
+                proc.pushImmediate (event);
+        })
+
+        // ---- JS → C++ : step sequence updates ---------------------------------
         .withEventListener ("setStepSequence", [&proc] (const juce::var& payload)
         {
-            auto* notesArray = payload["notes"].getArray();
-            if (notesArray == nullptr)
-                return;
-
-            // Each entry is a single note or an array holding a chord.
-            // A note — in either position — is a bare int or an { n, d, p }
-            // object: d phrases it later into the step (fraction of one
-            // step), p is its hit probability. An empty array is a silent
-            // step.
-            auto parseNote = [] (const juce::var& v)
-            {
-                StepNote sn;
-                if (v.isObject())
-                {
-                    sn.note  = static_cast<int> (v["n"]);
-                    sn.delay = juce::jlimit (0.0, 0.99, static_cast<double> (v["d"]));
-
-                    // Missing "p" must mean "always plays", not 0
-                    const auto p = v["p"];
-                    sn.probability = p.isVoid()
-                        ? 1.0
-                        : juce::jlimit (0.0, 1.0, static_cast<double> (p));
-                }
-                else
-                {
-                    sn.note = static_cast<int> (v);
-                }
-                return sn;
-            };
-
-            std::vector<std::vector<StepNote>> steps;
-            steps.reserve (static_cast<size_t> (notesArray->size()));
-            for (const auto& entry : *notesArray)
-            {
-                std::vector<StepNote> chord;
-                if (auto* chordArray = entry.getArray())
-                {
-                    chord.reserve (static_cast<size_t> (chordArray->size()));
-                    for (const auto& n : *chordArray)
-                        chord.push_back (parseNote (n));
-                }
-                else
-                {
-                    chord.push_back (parseNote (entry));
-                }
-                steps.push_back (std::move (chord));
-            }
-
-            double multiplier = static_cast<double> (payload["subdivision"]);
-            double durationMs = static_cast<double> (payload["durationMs"]);
-            bool   legato     = static_cast<bool> (payload["legato"]);
-
-            if (multiplier <= 0.0) multiplier = 2.0;
-            if (durationMs <= 0.0) durationMs = 150.0;
-
-            proc.setStepSequence (std::move (steps), multiplier, durationMs, legato);
+            if (! proc.setStepSequence (payload))
+                juce::Logger::writeToLog ("setStepSequence: payload rejected");
         })
 
-        // ---- JS → C++ : persist experiment state -----------------------------
+        // ---- JS → C++ : persist experiment state -------------------------------
         .withEventListener ("saveState", [&proc] (const juce::var& payload)
         {
             auto key = payload["key"].toString();
@@ -128,16 +76,17 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc, PluginEditor& editor)
             proc.setWebState (key, payload["value"].toString());
         })
 
-        // ---- JS → C++ → JS : page asks for saved state after it loads --------
-        .withEventListener ("requestState", [&proc, &editor] (const juce::var&)
+        // ---- JS → C++ : uncaught page errors -----------------------------------
+        .withEventListener ("jsError", [] (const juce::var& payload)
         {
-            editor.browser.emitEventIfBrowserIsVisible ("webStateData",
-                                                        proc.getWebStateAsVar());
+            juce::Logger::writeToLog ("JS error: " + payload["message"].toString()
+                                      + " (" + payload["source"].toString()
+                                      + ":" + payload["line"].toString() + ")");
         })
 
-        // ---- Serve web assets ------------------------------------------------
-        // Debug: read from the source web/ directory (live reload).
-        // Release: read from BinaryData (self-contained binary).
+        // ---- Serve web assets --------------------------------------------------
+        // Dev builds read web/ from the source tree (live reload); otherwise
+        // the copy bundled into the binary is served.
         .withResourceProvider ([] (const juce::String& url)
             -> std::optional<Resource>
         {
@@ -146,12 +95,8 @@ PluginEditor::createBrowserOptions (PluginProcessor& proc, PluginEditor& editor)
                 ? juce::String ("index.html")
                 : url.fromLastOccurrenceOf ("/", false, false);
 
-          #if JUCE_DEBUG
-            // Derive web/ from this source file: src/PluginEditor.cpp → ../web/
-            auto webDir = juce::File (__FILE__)
-                              .getParentDirectory()
-                              .getParentDirectory()
-                              .getChildFile ("web");
+          #if SCAFFOLD_WEB_DEV
+            const juce::File webDir (SCAFFOLD_WEB_DEV_DIR);
             auto devFile = webDir.getChildFile (filename);
 
             if (devFile.existsAsFile())
@@ -209,13 +154,17 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     // which our resource provider answers with index.html.
     browser.goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
-    // Start the transport-state timer at ~60 fps (16 ms interval).
+    processorRef.addChangeListener (this);
+
+    // Ticks go out at ~60 fps (16 ms interval).
     startTimerHz (60);
 }
 
 PluginEditor::~PluginEditor()
 {
     stopTimer();
+    processorRef.removeChangeListener (this);
+    processorRef.editorDetached();
 }
 
 // =============================================================================
@@ -227,18 +176,39 @@ void PluginEditor::resized()
 }
 
 // =============================================================================
-// Timer — push transport state from the atomic struct into the web view.
-// Runs on the message thread at ~60 fps.
+// State — the saved web state, sent when the page asks and again when the host
+// restores a project under an open editor.
+// =============================================================================
+void PluginEditor::sendState()
+{
+    browser.emitEventIfBrowserIsVisible ("state", bridge::makeState (processorRef.getWebState()));
+}
+
+void PluginEditor::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    if (pageIsLoaded)
+        sendState();
+}
+
+// =============================================================================
+// Timer — one tick per frame: the transport, plus the step boundaries the
+// sequencer crossed since the last one. Runs on the message thread at ~60 fps.
 // =============================================================================
 void PluginEditor::timerCallback()
 {
-    auto* obj = new juce::DynamicObject();
-    obj->setProperty ("bpm",              processorRef.transportState.bpm.load (std::memory_order_relaxed));
-    obj->setProperty ("beatPosition",     processorRef.transportState.beatPosition.load (std::memory_order_relaxed));
-    obj->setProperty ("isPlaying",        processorRef.transportState.isPlaying.load (std::memory_order_relaxed));
-    obj->setProperty ("timeSigNumerator", processorRef.transportState.timeSigNumerator.load (std::memory_order_relaxed));
-    obj->setProperty ("timeSigDenominator", processorRef.transportState.timeSigDenominator.load (std::memory_order_relaxed));
-    obj->setProperty ("sessionId",          processorRef.sessionId);
+    if (! pageIsLoaded)
+        return;
 
-    browser.emitEventIfBrowserIsVisible ("transportState", juce::var (obj));
+    const int numSteps = processorRef.popStepEvents (stepScratch.data(), static_cast<int> (stepScratch.size()));
+
+    const auto& transport = processorRef.transport;
+
+    bridge::Tick tick;
+    tick.bpm                = transport.bpm.load (std::memory_order_relaxed);
+    tick.beatPosition       = transport.beatPosition.load (std::memory_order_relaxed);
+    tick.isPlaying          = transport.isPlaying.load (std::memory_order_relaxed);
+    tick.timeSigNumerator   = transport.timeSigNumerator.load (std::memory_order_relaxed);
+    tick.timeSigDenominator = transport.timeSigDenominator.load (std::memory_order_relaxed);
+
+    browser.emitEventIfBrowserIsVisible ("tick", bridge::makeTick (tick, stepScratch.data(), numSteps));
 }
