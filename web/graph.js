@@ -6,11 +6,8 @@ Shell.register({
   _group: null,
   _context: null,
   _unsubscribeScale: null,
-  _onPointerDown: null,
-  _onPointerMove: null,
-  _onPointerUp: null,
-  _onPointerCancel: null,
-  _onDblClick: null,
+  _paused: false,
+  _sequenceStale: false,   // scale changed while paused, so the stored sequence holds old notes
   _hoveredIndex: -1,
   _isPressed: false,
   _pressIndex: -1,
@@ -63,7 +60,20 @@ Shell.register({
     this._group = new THREE.Group();
     context.scene.add(this._group);
 
+    this._buildNodes();
+    this._buildHeadRing();
+    this._buildProbLabel();
+
+    context.store.load((saved) => this._restoreChain(saved));
+    context.midi.setStepSequence(this._sequenceSteps(), 150);
+
+    // Subscribed only once the saved chain is in place: a scale callback
+    // during boot would see the restored chain as stale and wipe it.
     this._unsubscribeScale = context.scale.onChange(() => {
+      // The sequence this experiment handed to the shell holds the old
+      // notes; a paused experiment can't replace it until it resumes.
+      if (this._paused) this._sequenceStale = true;
+
       // Same node count → remap notes in place, preserving the chain.
       // Different scale length → the ring layout itself is stale (node
       // positions and octave split were built for the old length), so tear
@@ -75,12 +85,6 @@ Shell.register({
         this._rebuild();
       }
     });
-
-    this._buildNodes();
-    this._buildHeadRing();
-    this._buildProbLabel();
-    this._chainRestored = false;
-    this._bindEvents();
   },
 
   _buildProbLabel() {
@@ -187,50 +191,12 @@ Shell.register({
   // Event handling
   // ==================================================================
 
-  _bindEvents() {
-    var self = this;
-    var canvas = this._context.renderer.domElement;
-
-    this._onPointerDown   = function (e) { self._handlePointerDown(e); };
-    this._onPointerMove   = function (e) { self._handlePointerMove(e); };
-    this._onPointerUp     = function (e) { self._handlePointerUp(e); };
-    this._onPointerCancel = function (e) { self._handlePointerCancel(e); };
-    this._onDblClick      = function (e) { self._handleDblClick(e); };
-
-    canvas.addEventListener('pointerdown',   this._onPointerDown);
-    canvas.addEventListener('pointermove',   this._onPointerMove);
-    canvas.addEventListener('pointerup',     this._onPointerUp);
-    canvas.addEventListener('pointercancel', this._onPointerCancel);
-    canvas.addEventListener('dblclick',      this._onDblClick);
-  },
-
-  _unbindEvents() {
-    var canvas = this._context.renderer.domElement;
-    if (this._onPointerDown)   canvas.removeEventListener('pointerdown',   this._onPointerDown);
-    if (this._onPointerMove)   canvas.removeEventListener('pointermove',   this._onPointerMove);
-    if (this._onPointerUp)     canvas.removeEventListener('pointerup',     this._onPointerUp);
-    if (this._onPointerCancel) canvas.removeEventListener('pointercancel', this._onPointerCancel);
-    if (this._onDblClick)      canvas.removeEventListener('dblclick',      this._onDblClick);
-  },
-
-  _clientToWorld(e) {
-    var rect = this._context.renderer.domElement.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: rect.height - (e.clientY - rect.top)
-    };
-  },
-
-  _hitTest(e) {
-    var rect = this._context.renderer.domElement.getBoundingClientRect();
-    var mx = e.clientX - rect.left;
-    var my = rect.height - (e.clientY - rect.top);
-
+  _hitTest(p) {
     for (var i = 0; i < this._nodes.length; i++) {
       var node = this._nodes[i];
       var hitRadius = node.ring === 0 ? this._nodeRadiusInner : this._nodeRadius;
-      var dx = mx - node.x;
-      var dy = my - node.y;
+      var dx = p.x - node.x;
+      var dy = p.y - node.y;
       if (dx * dx + dy * dy <= hitRadius * hitRadius) {
         return i;
       }
@@ -238,34 +204,29 @@ Shell.register({
     return -1;
   },
 
-  _handlePointerDown(e) {
+  onPointerDown(p, e) {
     if (e.button !== 0) return;
 
     // The probability readout swallows presses before node logic runs.
     // Value doesn't change on the press itself — only on vertical drag.
-    var w0 = this._clientToWorld(e);
-    if (this._probNode !== -1 && this._probNumberHit(w0)) {
+    if (this._probNode !== -1 && this._probNumberHit(p)) {
       this._probDragging = true;
-      this._probDragStartY = w0.y;
+      this._probDragStartY = p.y;
       this._probDragStartVal = this._nodes[this._probNode].probability;
-      try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
       this._updateCursor();
       return;
     }
 
-    var rect = this._context.renderer.domElement.getBoundingClientRect();
-    this._pressX = e.clientX - rect.left;
-    this._pressY = e.clientY - rect.top;
-    this._pressIndex = this._hitTest(e);
+    this._pressX = p.x;
+    this._pressY = p.y;
+    this._pressIndex = this._hitTest(p);
     this._isPressed = true;
-    try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor();
   },
 
-  _handlePointerUp(e) {
+  onPointerUp(p, e) {
     if (this._probDragging) {
       this._probDragging = false;
-      try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
       // Commit: pushes probabilities to the sequencer and persists them
       this._sendSequence();
       this._updateCursor();
@@ -279,7 +240,6 @@ Shell.register({
     this._isPressed       = false;
     this._isDragging      = false;
     this._dragSourceIndex = -1;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
 
     if (e.button !== 0) {
       this._pressIndex = -1;
@@ -289,7 +249,7 @@ Shell.register({
 
     if (wasDragging) {
       if (this._drag && this._drag.phase === 'following') {
-        var target = this._hitTest(e);
+        var target = this._hitTest(p);
         if (target !== -1 && target !== dragSource && !this._nodes[target].active) {
           this._startDrop(target);
         } else {
@@ -300,12 +260,11 @@ Shell.register({
         this._startSnapback();
       }
     } else {
-      var rect = this._context.renderer.domElement.getBoundingClientRect();
-      var dx = (e.clientX - rect.left) - this._pressX;
-      var dy = (e.clientY - rect.top)  - this._pressY;
+      var dx = p.x - this._pressX;
+      var dy = p.y - this._pressY;
       var t = this._dragThreshold;
       if (dx * dx + dy * dy <= t * t) {
-        this._handleClick(e);
+        this._handleClick(p);
       }
     }
 
@@ -313,7 +272,7 @@ Shell.register({
     this._updateCursor();
   },
 
-  _handlePointerCancel(e) {
+  onPointerCancel(p, e) {
     this._isPressed       = false;
     this._isDragging      = false;
     this._dragSourceIndex = -1;
@@ -323,7 +282,6 @@ Shell.register({
     this._probNode        = -1;
     this._updateProbDisplay();
     this._destroyDrag();
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor();
   },
 
@@ -334,7 +292,6 @@ Shell.register({
   },
 
   _updateCursor() {
-    var canvas = this._context.renderer.domElement;
     var cursor = '';
     if (this._probDragging || this._probSliderHover) {
       cursor = 'ns-resize';
@@ -348,11 +305,11 @@ Shell.register({
     } else if (this._hoveredIndex !== -1) {
       cursor = this._nodes[this._hoveredIndex].active ? 'grab' : 'pointer';
     }
-    canvas.style.cursor = cursor;
+    this._context.setCursor(cursor);
   },
 
-  _handleClick(e) {
-    var hit = this._hitTest(e);
+  _handleClick(p) {
+    var hit = this._hitTest(p);
     if (hit === -1) return;
 
     var node = this._nodes[hit];
@@ -370,9 +327,9 @@ Shell.register({
     }
   },
 
-  _handlePointerMove(e) {
+  onPointerMove(p, e) {
     if (this._probDragging) {
-      this._setProbFromDrag(this._clientToWorld(e).y);
+      this._setProbFromDrag(p.y);
       return;
     }
 
@@ -380,25 +337,22 @@ Shell.register({
     if (this._isPressed && !this._isDragging && this._pressIndex !== -1) {
       var src = this._nodes[this._pressIndex];
       if (src && src.active) {
-        var rect = this._context.renderer.domElement.getBoundingClientRect();
-        var dx = (e.clientX - rect.left) - this._pressX;
-        var dy = (e.clientY - rect.top)  - this._pressY;
+        var dx = p.x - this._pressX;
+        var dy = p.y - this._pressY;
         var t = this._dragThreshold;
         if (dx * dx + dy * dy > t * t) {
           this._isDragging = true;
           this._dragSourceIndex = this._pressIndex;
-          var w = this._clientToWorld(e);
-          this._initDrag(this._pressIndex, w.x, w.y);
+          this._initDrag(this._pressIndex, p.x, p.y);
         }
       }
     }
 
     if (this._isDragging) {
-      var w2 = this._clientToWorld(e);
-      this._updateDragCursor(w2.x, w2.y);
+      this._updateDragCursor(p.x, p.y);
     }
 
-    var hit = this._hitTest(e);
+    var hit = this._hitTest(p);
     if (this._isDragging && hit !== -1 && !this._isValidDropTarget(hit)) {
       hit = -1;
     }
@@ -414,13 +368,12 @@ Shell.register({
         this._updateProbDisplay();
       }
     } else {
-      var wp = this._clientToWorld(e);
-      this._probSliderHover = this._probNode !== -1 && this._probNumberHit(wp);
+      this._probSliderHover = this._probNode !== -1 && this._probNumberHit(p);
       if (hit !== -1) {
         // Probability only applies to notes in the chain — no readout for
         // inactive nodes.
         this._probNode = this._nodes[hit].active ? hit : -1;
-      } else if (this._probNode !== -1 && !this._inProbCorridor(wp)) {
+      } else if (this._probNode !== -1 && !this._inProbCorridor(p)) {
         this._probNode = -1;
       }
       this._updateProbDisplay();
@@ -429,8 +382,8 @@ Shell.register({
     this._updateCursor();
   },
 
-  _handleDblClick(e) {
-    var hit = this._hitTest(e);
+  onDoubleClick(p, e) {
+    var hit = this._hitTest(p);
     if (hit !== -1) return;
     this._clearChain();
   },
@@ -673,11 +626,9 @@ Shell.register({
     var d = this._drag;
     this._restoreSourceGeometry();
     this._group.remove(d.budMesh);
-    d.budMesh.geometry.dispose();
-    d.budMesh.material.dispose();
+    this._context.util.disposeObject(d.budMesh);
     this._group.remove(d.strandMesh);
-    d.strandMesh.geometry.dispose();
-    d.strandMesh.material.dispose();
+    this._context.util.disposeObject(d.strandMesh);
     this._drag = null;
   },
 
@@ -1093,8 +1044,7 @@ Shell.register({
       node.octave = octave;
 
       this._group.remove(node.labelSprite);
-      if (node.labelSprite.material.map) node.labelSprite.material.map.dispose();
-      node.labelSprite.material.dispose();
+      this._context.util.disposeObject(node.labelSprite);
 
       node.labelSprite = this._makeLabel(ctx.scale.getNoteName(node.midiNote));
       node.labelSprite.position.set(node.x, node.y, 0.2);
@@ -1124,35 +1074,7 @@ Shell.register({
   _rebuild() {
     this._destroyDrag();
 
-    for (var i = 0; i < this._nodes.length; i++) {
-      var node = this._nodes[i];
-      this._group.remove(node.mesh);
-      node.mesh.geometry.dispose();
-      node.mesh.material.dispose();
-      this._group.remove(node.labelSprite);
-      if (node.labelSprite.material.map) node.labelSprite.material.map.dispose();
-      node.labelSprite.material.dispose();
-    }
-    for (var j = 0; j < this._edges.length; j++) {
-      this._group.remove(this._edges[j].line);
-      this._edges[j].line.geometry.dispose();
-      this._edges[j].line.material.dispose();
-    }
-    if (this._headRing) {
-      this._group.remove(this._headRing);
-      this._headRing.geometry.dispose();
-      this._headRing.material.dispose();
-      this._headRing = null;
-    }
-
-    if (this._probLabel) {
-      this._group.remove(this._probLabel);
-      if (this._probLabel.material.map) this._probLabel.material.map.dispose();
-      this._probLabel.material.dispose();
-      this._probLabel = null;
-      this._probCanvas = null;
-      this._probTexture = null;
-    }
+    this._context.util.disposeGroup(this._group);
 
     this._nodes = [];
     this._edges = [];
@@ -1173,7 +1095,7 @@ Shell.register({
   // Lifecycle
   // ==================================================================
 
-  _sendSequence() {
+  _sequenceSteps() {
     var notes = [];
     for (var i = 0; i < this._sequence.length; i++) {
       var node = this._nodes[this._sequence[i]];
@@ -1181,59 +1103,46 @@ Shell.register({
         ? { n: node.midiNote, p: node.probability }
         : node.midiNote);
     }
-    this._context.midi.setStepSequence(notes, 150);
+    return notes;
+  },
+
+  _sendSequence() {
+    this._context.midi.setStepSequence(this._sequenceSteps(), 150);
     this._saveChain();
   },
 
-  _getSessionId() {
-    return this._context.getTransport().sessionId || '';
-  },
-
   _saveChain() {
-    localStorage.setItem('graph.chain', JSON.stringify(this._sequence));
-    localStorage.setItem('graph.probs',
-      JSON.stringify(this._nodes.map(function (n) { return n.probability; })));
-    localStorage.setItem('graph.sessionId', this._getSessionId());
+    this._context.store.save({
+      chain: this._sequence.slice(),
+      probs: this._nodes.map(function (n) { return n.probability; })
+    });
   },
 
-  _restoreChain() {
-    var sessionId = this._getSessionId();
-    var storedSession = localStorage.getItem('graph.sessionId');
-    if (storedSession !== sessionId) {
-      localStorage.removeItem('graph.chain');
-      localStorage.removeItem('graph.probs');
-      localStorage.removeItem('graph.sessionId');
-      return;
+  _restoreChain(saved) {
+    if (!saved || typeof saved !== 'object') return;
+
+    // The saved probability list has one entry per node, so its length says
+    // which ring layout the chain was built for. Graph is built lazily and
+    // misses scale changes made while another experiment was active; if the
+    // scale length moved in the meantime the indices point at other nodes.
+    if (!Array.isArray(saved.probs) || saved.probs.length !== this._nodes.length) return;
+
+    for (var pi = 0; pi < saved.probs.length; pi++) {
+      if (typeof saved.probs[pi] === 'number') {
+        this._nodes[pi].probability = Math.max(0, Math.min(1, saved.probs[pi]));
+      }
     }
 
-    var savedProbs = localStorage.getItem('graph.probs');
-    if (savedProbs) {
-      try {
-        var probs = JSON.parse(savedProbs);
-        if (Array.isArray(probs)) {
-          var count = Math.min(probs.length, this._nodes.length);
-          for (var pi = 0; pi < count; pi++) {
-            if (typeof probs[pi] === 'number') {
-              this._nodes[pi].probability = Math.max(0, Math.min(1, probs[pi]));
-            }
-          }
-        }
-      } catch (e2) {}
-    }
-
-    var saved = localStorage.getItem('graph.chain');
-    if (!saved) return;
-
-    var indices;
-    try { indices = JSON.parse(saved); } catch (e) { return; }
+    var indices = saved.chain;
     if (!Array.isArray(indices) || indices.length === 0) return;
+
+    // A chain that doesn't fit the current layout is dropped whole.
+    for (var v = 0; v < indices.length; v++) {
+      if (!Number.isInteger(indices[v]) || indices[v] < 0 || indices[v] >= this._nodes.length) return;
+    }
 
     for (var i = 0; i < indices.length; i++) {
       var idx = indices[i];
-      if (idx < 0 || idx >= this._nodes.length) {
-        this._clearChain();
-        return;
-      }
 
       if (i === 0) {
         this._nodes[idx].active = true;
@@ -1253,15 +1162,18 @@ Shell.register({
     }
 
     this._updateHeadRing();
-    this._sendSequence();
   },
 
-  step(stepIndex) {
-    if (this._sequence.length === 0) return;
+  step(stepIndex, played) {
+    var length = this._sequence.length;
+    if (length === 0) return;
 
-    this._cursor = stepIndex % this._sequence.length;
-    var nodeIndex = this._sequence[this._cursor];
-    this._popNode(nodeIndex);
+    this._cursor = ((stepIndex % length) + length) % length;
+    var node = this._nodes[this._sequence[this._cursor]];
+    // Probability is rolled in C++; a skipped step must not look like a hit.
+    if (played.indexOf(node.midiNote) !== -1) {
+      this._popNode(this._sequence[this._cursor]);
+    }
   },
 
   _bgColor: new THREE.Color(0x111111),
@@ -1269,11 +1181,6 @@ Shell.register({
   _dimmedLabelColor: new THREE.Color(),
 
   update(delta, transport) {
-    if (!this._chainRestored && this._getSessionId()) {
-      this._chainRestored = true;
-      this._restoreChain();
-    }
-
     // If the node under the readout left the chain (click-retract, clear,
     // drag-relocate), drop the readout without waiting for a pointer move.
     if (this._probNode !== -1
@@ -1334,11 +1241,10 @@ Shell.register({
     }
   },
 
-  // The shell keeps paused experiments loaded (and never calls destroy on
-  // switch), so input listeners must be released here or clicks meant for
-  // the next experiment would keep mutating this one's chain.
+  // The shell keeps paused experiments loaded, so any interaction in
+  // progress has to be dropped here rather than resumed later.
   pause() {
-    this._unbindEvents();
+    this._paused = true;
     this._destroyDrag();
     this._isPressed = false;
     this._isDragging = false;
@@ -1350,19 +1256,19 @@ Shell.register({
     this._probNode = -1;
     this._updateProbDisplay();
     this._updateCursor();
-    // The C++ sequencer is shared between experiments — hand it back empty
-    // so this chain doesn't keep sounding under whatever activates next.
-    this._context.midi.setStepSequence([], 150);
   },
 
   resume() {
-    this._bindEvents();
-    this._sendSequence();
+    this._paused = false;
+    if (this._sequenceStale) {
+      this._sequenceStale = false;
+      this._context.midi.setStepSequence(this._sequenceSteps(), 150);
+    }
   },
 
   destroy() {
-    this._unbindEvents();
     if (this._unsubscribeScale) this._unsubscribeScale();
     this._destroyDrag();
+    this._context.util.disposeGroup(this._group);
   },
 });

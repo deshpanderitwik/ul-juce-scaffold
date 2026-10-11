@@ -24,10 +24,6 @@ const ScratchExperiment = {
   _group: null,
   _context: null,
   _unsubscribeScale: null,
-  _onPointerDown: null,
-  _onPointerMove: null,
-  _onPointerUp: null,
-  _onPointerCancel: null,
 
   // --- Sound ---
   _note:     60,         // C3 in this project's naming (percussion — key-agnostic)
@@ -38,7 +34,7 @@ const ScratchExperiment = {
   // exponential so the speed-up feels even across the whole travel.
   _maxRatchet: 8,
   _ratchet:    1,        // current multiplier (continuous)
-  _stepMult:   2,        // steps per beat, inferred from step() calls
+  _stepMult:   2,        // steps per beat of the selected subdivision
 
   // Free-running engine (active while displaced from center)
   _free:       false,
@@ -92,20 +88,12 @@ const ScratchExperiment = {
     // pitched variant can rebuild here.
     this._unsubscribeScale = context.scale.onChange(() => {});
 
+    this._stepMult = context.getSubdivision().stepsPerBeat;
     this._rebuild();
-    this._bindEvents();
   },
 
   _rebuild() {
-    while (this._group.children.length) {
-      var child = this._group.children[0];
-      this._group.remove(child);
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (child.material.map) child.material.map.dispose();
-        child.material.dispose();
-      }
-    }
+    this._context.util.disposeGroup(this._group);
 
     var size = this._context.getSize();
     this._cx = size.width / 2;
@@ -233,21 +221,16 @@ const ScratchExperiment = {
     this._sendSequence();
   },
 
-  // The shell calls this at each subdivision boundary. We use it to learn
-  // the step rate (base for the free engine, gate length for the grid) and
-  // to pulse the visuals — the grid engine itself runs in C++.
-  step(stepIndex) {
-    var beat = this._context.getTransport().beatPosition;
-    var candidates = [0.25, 0.5, 1, 2, 3, 4];
-    var best = this._stepMult, bestErr = Infinity;
-    for (var i = 0; i < candidates.length; i++) {
-      var err = Math.abs(beat * candidates[i] - stepIndex);
-      if (err < bestErr) { bestErr = err; best = candidates[i]; }
-    }
-    if (best !== this._stepMult) {
-      this._stepMult = best;
-      if (this._playing && !this._free) this._sendSequence();
-    }
+  // The step rate is the base for the free engine and sets the gate length
+  // on the grid, so a change has to reach the sequencer too.
+  onSubdivisionChange(sub) {
+    this._stepMult = sub.stepsPerBeat;
+    if (this._playing && !this._free) this._sendSequence();
+  },
+
+  // Pulses the visuals at each step boundary — the grid engine itself runs
+  // in C++.
+  step() {
     if (this._playing && !this._free) this._flash = 1.0;
   },
 
@@ -255,52 +238,22 @@ const ScratchExperiment = {
   // Input
   // ====================================================================
 
-  _bindEvents() {
-    var self = this;
-    var canvas = this._context.renderer.domElement;
-    this._onPointerDown   = function (e) { self._handlePointerDown(e); };
-    this._onPointerMove   = function (e) { self._handlePointerMove(e); };
-    this._onPointerUp     = function (e) { self._handlePointerUp(e); };
-    this._onPointerCancel = function (e) { self._handlePointerCancel(e); };
-    canvas.addEventListener('pointerdown',   this._onPointerDown);
-    canvas.addEventListener('pointermove',   this._onPointerMove);
-    canvas.addEventListener('pointerup',     this._onPointerUp);
-    canvas.addEventListener('pointercancel', this._onPointerCancel);
-  },
-
-  _unbindEvents() {
-    var canvas = this._context.renderer.domElement;
-    if (this._onPointerDown)   canvas.removeEventListener('pointerdown',   this._onPointerDown);
-    if (this._onPointerMove)   canvas.removeEventListener('pointermove',   this._onPointerMove);
-    if (this._onPointerUp)     canvas.removeEventListener('pointerup',     this._onPointerUp);
-    if (this._onPointerCancel) canvas.removeEventListener('pointercancel', this._onPointerCancel);
-  },
-
-  _clientToWorld(e) {
-    var rect = this._context.renderer.domElement.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: rect.height - (e.clientY - rect.top) };
-  },
-
   _hitCircle(p) {
     var dx = p.x - this._x, dy = p.y - this._y;
     return dx * dx + dy * dy <= this._radius * this._radius;
   },
 
-  _handlePointerDown(e) {
+  onPointerDown(p, e) {
     if (e.button !== 0) return;
-    var p = this._clientToWorld(e);
     if (!this._hitCircle(p)) return;
     this._pressed = true;
     this._dragging = false;
     this._pressX = p.x;
     this._pressY = p.y;
-    try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor(p);
   },
 
-  _handlePointerMove(e) {
-    var p = this._clientToWorld(e);
-
+  onPointerMove(p) {
     if (this._pressed && !this._dragging) {
       var dx = p.x - this._pressX, dy = p.y - this._pressY;
       if (dx * dx + dy * dy > this._dragThreshold * this._dragThreshold) {
@@ -323,30 +276,28 @@ const ScratchExperiment = {
     this._updateCursor(p);
   },
 
-  _handlePointerUp(e) {
+  onPointerUp(p) {
     if (!this._pressed) return;
     var wasDrag = this._dragging;
     this._pressed = false;
     this._dragging = false;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
 
     if (!wasDrag) this._togglePlaying();
     // On drag release the ramp in update() takes over.
-    this._updateCursor(this._clientToWorld(e));
+    this._updateCursor(p);
   },
 
-  _handlePointerCancel(e) {
+  onPointerCancel() {
     this._pressed = false;
     this._dragging = false;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor(null);
   },
 
   _updateCursor(p) {
-    var canvas = this._context.renderer.domElement;
-    if (this._dragging)               canvas.style.cursor = 'grabbing';
-    else if (p && this._hitCircle(p)) canvas.style.cursor = 'grab';
-    else                              canvas.style.cursor = '';
+    var ctx = this._context;
+    if (this._dragging)               ctx.setCursor('grabbing');
+    else if (p && this._hitCircle(p)) ctx.setCursor('grab');
+    else                              ctx.setCursor('');
   },
 
   // ====================================================================
@@ -429,25 +380,22 @@ const ScratchExperiment = {
   // ====================================================================
 
   pause() {
-    this._unbindEvents();
     this._pressed = false;
     this._dragging = false;
-    this._context.renderer.domElement.style.cursor = '';
-    // The sequencer is shared — hand it back empty
-    this._context.midi.setStepSequence([], 50);
   },
 
+  // Free mode and the puck position are reset, so the grid sequence the
+  // experiment last stored may no longer be the right one.
   resume() {
-    this._bindEvents();
+    this._stepMult = this._context.getSubdivision().stepsPerBeat;
     this._free = false;
     this._x = this._cx; this._y = this._cy;
     if (this._playing) this._sendSequence();
   },
 
   destroy() {
-    this._unbindEvents();
-    this._context.midi.setStepSequence([], 50);
     if (this._unsubscribeScale) this._unsubscribeScale();
+    this._context.util.disposeGroup(this._group);
     if (this._group && this._group.parent) this._group.parent.remove(this._group);
   },
 };

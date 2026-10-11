@@ -12,10 +12,6 @@ const FoundationsExperiment = {
   _activeLine: null,
   _fadingTraces: [],
 
-  _boundDown: null,
-  _boundMove: null,
-  _boundUp: null,
-
   _balls: [],
   _ballRadius: 25,
 
@@ -43,25 +39,6 @@ const FoundationsExperiment = {
     });
 
     this._rebuild();
-
-    var self = this;
-    this._boundDown = function (e) { self._onDown(e); };
-    this._boundMove = function (e) { self._onMove(e); };
-    this._boundUp   = function (e) { self._onUp(e); };
-
-    this._bindInput();
-  },
-
-  _bindInput() {
-    document.addEventListener('mousedown', this._boundDown, true);
-    document.addEventListener('mousemove', this._boundMove, true);
-    document.addEventListener('mouseup',   this._boundUp,   true);
-  },
-
-  _unbindInput() {
-    document.removeEventListener('mousedown', this._boundDown, true);
-    document.removeEventListener('mousemove', this._boundMove, true);
-    document.removeEventListener('mouseup',   this._boundUp,   true);
   },
 
   _releaseHeldNotes() {
@@ -74,9 +51,7 @@ const FoundationsExperiment = {
   },
 
   _rebuild() {
-    while (this._group.children.length) {
-      this._group.remove(this._group.children[0]);
-    }
+    this._context.util.disposeGroup(this._group);
     this._activeLine = null;
     this._fadingTraces = [];
     this._points = [];
@@ -181,8 +156,7 @@ const FoundationsExperiment = {
   _rebuildOval() {
     if (this._ovalLine) {
       this._group.remove(this._ovalLine);
-      this._ovalLine.geometry.dispose();
-      this._ovalLine.material.dispose();
+      this._context.util.disposeObject(this._ovalLine);
       this._ovalLine = null;
     }
     this._buildOval();
@@ -233,18 +207,7 @@ const FoundationsExperiment = {
     return spr;
   },
 
-  _screenToWorld(e) {
-    var x = e.clientX;
-    var y = window.innerHeight - e.clientY;
-    return { x: x, y: y };
-  },
-
-  _onDown(e) {
-    var tag = (e.target && e.target.tagName) ? e.target.tagName : '';
-    if (tag === 'SELECT' || tag === 'BUTTON' || tag === 'OPTION') return;
-
-    var p = this._screenToWorld(e);
-
+  onPointerDown(p, e) {
     if (this._isNearOval(p.x, p.y)) {
       this._resizingOval = true;
       var size = this._context.getSize();
@@ -253,7 +216,7 @@ const FoundationsExperiment = {
       this._ovalGrabDist = Math.sqrt(dx * dx + dy * dy);
       this._ovalGrabRx = this._ovalRx;
       this._ovalGrabRy = this._ovalRy;
-      document.body.style.cursor = 'grabbing';
+      this._context.setCursor('grabbing');
       return;
     }
 
@@ -263,9 +226,7 @@ const FoundationsExperiment = {
     this._checkCollisions(p);
   },
 
-  _onMove(e) {
-    var p = this._screenToWorld(e);
-
+  onPointerMove(p, e) {
     if (this._resizingOval) {
       var size = this._context.getSize();
       var dx = p.x - size.width / 2;
@@ -311,19 +272,18 @@ const FoundationsExperiment = {
     }
 
     if (this._isNearOval(p.x, p.y)) {
-      document.body.style.cursor = 'grab';
+      this._context.setCursor('grab');
       if (this._ovalLine) this._ovalLine.material.opacity = 0.7;
     } else {
-      document.body.style.cursor = 'default';
+      this._context.setCursor('default');
       if (this._ovalLine) this._ovalLine.material.opacity = 0.4;
     }
   },
 
-  _onUp(e) {
+  onPointerUp(p, e) {
     if (this._resizingOval) {
       this._resizingOval = false;
-      var p = this._screenToWorld(e);
-      document.body.style.cursor = this._isNearOval(p.x, p.y) ? 'grab' : 'default';
+      this._context.setCursor(this._isNearOval(p.x, p.y) ? 'grab' : 'default');
       return;
     }
 
@@ -332,8 +292,7 @@ const FoundationsExperiment = {
 
     if (this._activeLine) {
       this._group.remove(this._activeLine);
-      this._activeLine.geometry.dispose();
-      this._activeLine.material.dispose();
+      this._context.util.disposeObject(this._activeLine);
       this._activeLine = null;
     }
 
@@ -345,13 +304,11 @@ const FoundationsExperiment = {
 
     this._points = [];
 
-    for (var i = 0; i < this._balls.length; i++) {
-      var ball = this._balls[i];
-      if (ball.isActive) {
-        ball.isActive = false;
-        this._context.midi.sendNoteOff(ball.midiNote, 1);
-      }
-    }
+    this._releaseHeldNotes();
+  },
+
+  onPointerCancel(p, e) {
+    this.onPointerUp(p, e);
   },
 
   _checkCollisions(p) {
@@ -376,8 +333,7 @@ const FoundationsExperiment = {
   _rebuildActiveLine() {
     if (this._activeLine) {
       this._group.remove(this._activeLine);
-      this._activeLine.geometry.dispose();
-      this._activeLine.material.dispose();
+      this._context.util.disposeObject(this._activeLine);
       this._activeLine = null;
     }
 
@@ -410,8 +366,7 @@ const FoundationsExperiment = {
       trace.opacity -= delta * 2.0;
       if (trace.opacity <= 0) {
         this._group.remove(trace.line);
-        trace.line.geometry.dispose();
-        trace.line.material.dispose();
+        this._context.util.disposeObject(trace.line);
         this._fadingTraces.splice(i, 1);
       } else {
         trace.line.material.opacity = trace.opacity;
@@ -459,39 +414,30 @@ const FoundationsExperiment = {
     }
   },
 
-  // The shell keeps paused experiments loaded (and never calls destroy on
-  // switch), so the document-level listeners must be released here or
-  // gestures in the next experiment would keep triggering these balls.
+  // The shell keeps paused experiments loaded and releases their held notes,
+  // but the balls' own isActive flags and the gesture in progress have to be
+  // reset here or the experiment would resume mid-drag.
   pause() {
-    this._unbindInput();
     this._dragging = false;
     this._resizingOval = false;
     this._releaseHeldNotes();
 
     if (this._activeLine) {
       this._group.remove(this._activeLine);
-      this._activeLine.geometry.dispose();
-      this._activeLine.material.dispose();
+      this._context.util.disposeObject(this._activeLine);
       this._activeLine = null;
     }
     this._points = [];
-
-    document.body.style.cursor = 'default';
-  },
-
-  resume() {
-    this._bindInput();
   },
 
   destroy() {
     this._releaseHeldNotes();
-    document.body.style.cursor = 'default';
     if (this._unsubscribeScale) this._unsubscribeScale();
-    this._unbindInput();
 
     if (this._group && this._group.parent) {
       this._group.parent.remove(this._group);
     }
+    this._context.util.disposeGroup(this._group);
   },
 };
 

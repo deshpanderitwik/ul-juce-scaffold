@@ -9,6 +9,10 @@
 // sequencer, so hits are sample-accurate. Whichever half of the ring is
 // NOT playing is regenerated as a continuation of the other half, so the
 // walk never audibly repeats and edits never touch the sounding step.
+//
+// C++ keeps playing the last ring with the window closed, so the ring and the
+// walker position are saved with the project and restored on open; otherwise
+// opening the window would swap the playing walk for a different random one.
 // ==========================================================================
 
 const RandomWalkerExperiment = {
@@ -61,11 +65,33 @@ const RandomWalkerExperiment = {
     this._group = new THREE.Group();
     context.scene.add(this._group);
 
+    var saved = null;
+    context.store.load(function (value) { saved = value; });
+    if (saved && Number.isInteger(saved.pos)) this._pos = saved.pos;
+
     this._unsubscribeScale = context.scale.onChange(() => this._rebuild());
-    this._rebuild();
+    this._buildScene();
+
+    if (this._isValidRing(saved && saved.ring)) {
+      this._ring = saved.ring.slice();
+    } else {
+      this._fillRing(0, this._ringLen, this._pos);
+      this._saveWalk();
+    }
+    this._sendRing();
   },
 
   _rebuild() {
+    this._buildScene();
+
+    // Whole ring from the current position — the sounding step may change
+    // here, but a key change is exactly when that should happen.
+    this._fillRing(0, this._ringLen, this._pos);
+    this._sendRing();
+    this._saveWalk();
+  },
+
+  _buildScene() {
     this._clearScene();
 
     var scale = this._context.scale;
@@ -77,23 +103,10 @@ const RandomWalkerExperiment = {
     this._pos = Math.max(0, Math.min(this._notes.length - 1, this._pos));
     this._buildMarkers();
     this._buildDot();
-
-    // Whole ring from the current position — the sounding step may change
-    // here, but a key change is exactly when that should happen.
-    this._fillRing(0, this._ringLen, this._pos);
-    this._sendRing();
   },
 
   _clearScene() {
-    while (this._group.children.length) {
-      var child = this._group.children[0];
-      this._group.remove(child);
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (child.material.map) child.material.map.dispose();
-        child.material.dispose();
-      }
-    }
+    this._context.util.disposeGroup(this._group);
     this._markers = [];
     this._trail   = [];
     this._dot     = null;
@@ -186,6 +199,20 @@ const RandomWalkerExperiment = {
     }
   },
 
+  // A saved ring is only usable if every index still points at a note of the
+  // current key.
+  _isValidRing(ring) {
+    if (!Array.isArray(ring) || ring.length !== this._ringLen) return false;
+    for (var i = 0; i < ring.length; i++) {
+      if (!Number.isInteger(ring[i]) || ring[i] < 0 || ring[i] >= this._notes.length) return false;
+    }
+    return true;
+  },
+
+  _saveWalk() {
+    this._context.store.save({ ring: this._ring, pos: this._pos });
+  },
+
   _sendRing() {
     var self = this;
     var notes = this._ring.map(function (idx) { return self._notes[idx]; });
@@ -207,6 +234,7 @@ const RandomWalkerExperiment = {
       if (slot < half) this._fillRing(half, this._ringLen, this._ring[half - 1]);
       else             this._fillRing(0, half, this._ring[this._ringLen - 1]);
       this._sendRing();
+      this._saveWalk();
     }
     this._lastStep = stepIndex;
 
@@ -272,17 +300,14 @@ const RandomWalkerExperiment = {
   // Shell lifecycle
   // ====================================================================
 
-  pause() {
-    this._context.midi.setStepSequence([], this._gateMs);
-  },
-
   resume() {
     this._lastStep = -1;
+    // A key change while paused rebuilt the ring, but the paused handle
+    // ignored the new sequence, so the stored one is stale.
     this._sendRing();
   },
 
   destroy() {
-    this._context.midi.setStepSequence([], this._gateMs);
     if (this._unsubscribeScale) this._unsubscribeScale();
     this._clearScene();
     if (this._group && this._group.parent) this._group.parent.remove(this._group);

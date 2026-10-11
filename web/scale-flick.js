@@ -26,10 +26,6 @@ const ScaleFlickExperiment = {
   _group: null,
   _context: null,
   _unsubscribeScale: null,
-  _onPointerDown: null,
-  _onPointerMove: null,
-  _onPointerUp: null,
-  _onPointerCancel: null,
 
   // --- Ruler ---
   _notes:        [],     // MIDI notes, low → high, two octaves + top root
@@ -65,8 +61,8 @@ const ScaleFlickExperiment = {
   _homeEps:    1.5,
 
   // --- Engines ---
-  _stepMult:  2,         // steps per beat, inferred from step()
-  _rot:       0,         // seq[k] = arp[(k + rot) % len]
+  _rot:       0,         // seq[k] = arp[(k + rot) % len]; saved, see _saveState
+  _gateSent:  null,      // gate (ms) of the last grid sequence sent; saved with rot
   _curIdx:    -1,        // arp position of the most recent hit
   _free:      false,
   _freePhase: 0,
@@ -81,7 +77,6 @@ const ScaleFlickExperiment = {
   _labelCanvas: null,
   _labelTex:    null,
   _labelValue:  '',
-  _stateRestored: false,
 
   _bgColor:       new THREE.Color(0x111111),
   _markerColor:   new THREE.Color(0x3a3a3a),
@@ -102,15 +97,15 @@ const ScaleFlickExperiment = {
 
     this._unsubscribeScale = context.scale.onChange(() => this._rebuild());
     this._rebuild();
-    this._bindEvents();
 
     var self = this;
     context.store.load(function (saved) {
+      // Without a saved rotation the arp starts from the bottom
+      var hasRot = !!saved && typeof saved.rot === 'number' && isFinite(saved.rot);
       self._restoreState(saved);
-      self._stateRestored = true;
       self._rebuildBand();
-      self._restartFromBottom();
-      self._sendSequence();
+      if (!hasRot) self._restartFromBottom();
+      self._sendSequence(hasRot ? self._gateSent : null);
     });
   },
 
@@ -129,14 +124,21 @@ const ScaleFlickExperiment = {
         if (typeof d === 'number' && d >= 0 && d < n) this._disabled[d] = true;
       }
     }
+    if (typeof s.rot === 'number' && isFinite(s.rot)) this._rot = Math.round(s.rot);
+    this._gateSent = (typeof s.gate === 'number' && isFinite(s.gate)) ? s.gate : null;
   },
 
+  // The rotation and gate are saved with the selection: C++ keeps playing the
+  // sequence it was given while the window is closed, and the window rebuilds
+  // that same sequence when it opens. A rotation recomputed from the transport
+  // position, or a gate recomputed from the tempo, at that moment would be a
+  // different sequence.
   _saveState() {
-    if (!this._stateRestored) return;
     var disabled = [];
     for (var k in this._disabled) if (this._disabled[k]) disabled.push(parseInt(k, 10));
     this._context.store.save({
-      selStart: this._selStart, selEnd: this._selEnd, disabled: disabled
+      selStart: this._selStart, selEnd: this._selEnd, disabled: disabled, rot: this._rot,
+      gate: this._gateSent
     });
   },
 
@@ -164,18 +166,11 @@ const ScaleFlickExperiment = {
 
     this._restartFromBottom();
     this._sendSequence();
+    this._saveState();
   },
 
   _clearScene() {
-    while (this._group.children.length) {
-      var child = this._group.children[0];
-      this._group.remove(child);
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (child.material.map) child.material.map.dispose();
-        child.material.dispose();
-      }
-    }
+    this._context.util.disposeGroup(this._group);
     this._markers = [];
     this._band    = null;
     this._label   = null;
@@ -267,8 +262,7 @@ const ScaleFlickExperiment = {
   _rebuildBand() {
     if (this._band) {
       this._group.remove(this._band);
-      this._band.geometry.dispose();
-      this._band.material.dispose();
+      this._context.util.disposeObject(this._band);
       this._band = null;
     }
     if (!this._hasSelection()) return;
@@ -298,12 +292,21 @@ const ScaleFlickExperiment = {
 
   _mod(a, n) { return ((a % n) + n) % n; },
 
+  _stepsPerBeat() {
+    return this._context.getSubdivision().stepsPerBeat;
+  },
+
+  // The grid step that will sound next. Once C++ has reported a step that is
+  // the one after it; before that (transport stopped, rate just changed) the
+  // first boundary at or after the transport position.
   _nextStep() {
-    return Math.floor(this._context.getTransport().beatPosition * this._stepMult) + 1;
+    var last = this._context.getStepIndex();
+    if (last !== -1) return last + 1;
+    return Math.ceil(this._context.getTransport().beatPosition * this._stepsPerBeat());
   },
 
   _baseHz(transport) {
-    return ((transport.tempo || 120) / 60) * this._stepMult;
+    return ((transport.tempo || 120) / 60) * this._stepsPerBeat();
   },
 
   _gateMs(periodMs) {
@@ -321,7 +324,9 @@ const ScaleFlickExperiment = {
     this._curIdx = -1;
   },
 
-  _sendSequence() {
+  // gateMs overrides the gate derived from the live tempo, so a sequence can be
+  // re-sent exactly as it was last sent.
+  _sendSequence(gateMs) {
     var arp = this._arp();
     if (this._free || arp.length === 0) {
       this._context.midi.setStepSequence([], 50);
@@ -331,8 +336,11 @@ const ScaleFlickExperiment = {
     for (var k = 0; k < arp.length; k++) {
       seq.push(this._notes[arp[this._mod(k + this._rot, arp.length)]]);
     }
-    var stepMs = 1000 / this._baseHz(this._context.getTransport());
-    this._context.midi.setStepSequence(seq, this._gateMs(stepMs));
+    if (typeof gateMs !== 'number') {
+      gateMs = this._gateMs(1000 / this._baseHz(this._context.getTransport()));
+    }
+    this._gateSent = gateMs;
+    this._context.midi.setStepSequence(seq, gateMs);
   },
 
   _enterFree(transport) {
@@ -340,7 +348,7 @@ const ScaleFlickExperiment = {
     this._free = true;
     var len = this._arp().length;
     this._freeIdx = len > 0 ? this._mod(this._curIdx + 1, len) : 0;
-    var beat = transport.beatPosition * this._stepMult;
+    var beat = transport.beatPosition * this._stepsPerBeat();
     this._freePhase = beat - Math.floor(beat);
     this._context.midi.setStepSequence([], 50);
   },
@@ -351,6 +359,7 @@ const ScaleFlickExperiment = {
     this._continueFrom(this._freeIdx);
     this._curIdx = this._freeIdx - 1;   // so the next grid hit reads as freeIdx
     this._sendSequence();
+    this._saveState();
   },
 
   _freeHit(periodMs) {
@@ -388,20 +397,7 @@ const ScaleFlickExperiment = {
     return -1;
   },
 
-  step(stepIndex) {
-    // Learn the grid rate
-    var beat = this._context.getTransport().beatPosition;
-    var candidates = [0.25, 0.5, 1, 2, 3, 4];
-    var best = this._stepMult, bestErr = Infinity;
-    for (var i = 0; i < candidates.length; i++) {
-      var err = Math.abs(beat * candidates[i] - stepIndex);
-      if (err < bestErr) { bestErr = err; best = candidates[i]; }
-    }
-    if (best !== this._stepMult) {
-      this._stepMult = best;
-      if (!this._free) this._sendSequence();
-    }
-
+  step(stepIndex, played) {
     if (this._free) return;
     var arp = this._arp();
     if (arp.length === 0) return;
@@ -410,35 +406,16 @@ const ScaleFlickExperiment = {
     this._flash    = 1.0;
   },
 
+  onSubdivisionChange(sub) {
+    // The gate follows the step period
+    if (this._free) return;
+    this._sendSequence();
+    this._saveState();
+  },
+
   // ====================================================================
   // Input
   // ====================================================================
-
-  _bindEvents() {
-    var self = this;
-    var canvas = this._context.renderer.domElement;
-    this._onPointerDown   = function (e) { self._handlePointerDown(e); };
-    this._onPointerMove   = function (e) { self._handlePointerMove(e); };
-    this._onPointerUp     = function (e) { self._handlePointerUp(e); };
-    this._onPointerCancel = function (e) { self._handlePointerCancel(e); };
-    canvas.addEventListener('pointerdown',   this._onPointerDown);
-    canvas.addEventListener('pointermove',   this._onPointerMove);
-    canvas.addEventListener('pointerup',     this._onPointerUp);
-    canvas.addEventListener('pointercancel', this._onPointerCancel);
-  },
-
-  _unbindEvents() {
-    var canvas = this._context.renderer.domElement;
-    if (this._onPointerDown)   canvas.removeEventListener('pointerdown',   this._onPointerDown);
-    if (this._onPointerMove)   canvas.removeEventListener('pointermove',   this._onPointerMove);
-    if (this._onPointerUp)     canvas.removeEventListener('pointerup',     this._onPointerUp);
-    if (this._onPointerCancel) canvas.removeEventListener('pointercancel', this._onPointerCancel);
-  },
-
-  _clientToWorld(e) {
-    var rect = this._context.renderer.domElement.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: rect.height - (e.clientY - rect.top) };
-  },
 
   // Nearest marker to x, or -1 if the pointer is off the ruler's ends
   _indexAtX(x) {
@@ -456,9 +433,8 @@ const ScaleFlickExperiment = {
     return p.x >= x0 && p.x <= x1 && Math.abs(p.y - y) <= this._bandHalfH;
   },
 
-  _handlePointerDown(e) {
+  onPointerDown(p, e) {
     if (e.button !== 0) return;
-    var p = this._clientToWorld(e);
     this._pressed  = true;
     this._dragging = false;
     this._pressX = p.x;
@@ -471,13 +447,10 @@ const ScaleFlickExperiment = {
       this._pressMode = 'select';
       this._selAnchor = this._indexAtX(p.x);
     }
-    try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor(p);
   },
 
-  _handlePointerMove(e) {
-    var p = this._clientToWorld(e);
-
+  onPointerMove(p, e) {
     if (this._pressed && !this._dragging) {
       var dx = p.x - this._pressX, dy = p.y - this._pressY;
       if (dx * dx + dy * dy > this._dragThreshold * this._dragThreshold) {
@@ -503,14 +476,12 @@ const ScaleFlickExperiment = {
     this._updateCursor(p);
   },
 
-  _handlePointerUp(e) {
+  onPointerUp(p, e) {
     if (!this._pressed) return;
-    var p = this._clientToWorld(e);
     var wasDrag = this._dragging;
     var mode    = this._pressMode;
     this._pressed  = false;
     this._dragging = false;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
 
     if (!wasDrag) {
       if (mode === 'band') {
@@ -531,21 +502,19 @@ const ScaleFlickExperiment = {
     this._updateCursor(p);
   },
 
-  _handlePointerCancel(e) {
+  onPointerCancel(p, e) {
     this._pressed  = false;
     this._dragging = false;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
     this._updateCursor(null);
   },
 
   _updateCursor(p) {
-    var canvas = this._context.renderer.domElement;
     if (this._dragging) {
-      canvas.style.cursor = this._pressMode === 'band' ? 'grabbing' : 'col-resize';
+      this._context.setCursor(this._pressMode === 'band' ? 'grabbing' : 'col-resize');
     } else if (p && this._onBand(p)) {
-      canvas.style.cursor = 'grab';
+      this._context.setCursor('grab');
     } else {
-      canvas.style.cursor = '';
+      this._context.setCursor('');
     }
   },
 
@@ -652,24 +621,21 @@ const ScaleFlickExperiment = {
   // ====================================================================
 
   pause() {
-    this._unbindEvents();
     this._pressed  = false;
     this._dragging = false;
-    this._context.renderer.domElement.style.cursor = '';
-    this._context.midi.setStepSequence([], 50);
   },
 
+  // The arp starts from the bottom each time the experiment is shown; the lift
+  // does not survive being hidden.
   resume() {
-    this._bindEvents();
     this._free = false;
     this._lift = 0;
     this._restartFromBottom();
     this._sendSequence();
+    this._saveState();
   },
 
   destroy() {
-    this._unbindEvents();
-    this._context.midi.setStepSequence([], 50);
     if (this._unsubscribeScale) this._unsubscribeScale();
     this._clearScene();
     if (this._group && this._group.parent) this._group.parent.remove(this._group);

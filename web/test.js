@@ -64,12 +64,19 @@ Shell.register({
   },
 
   _clearLanes: function () {
+    var scene = this._ctx.scene;
+    var util  = this._ctx.util;
+    var gone  = [];
     for (var i = 0; i < this._lanes.length; i++) {
-      this._ctx.scene.remove(this._lanes[i].mesh);
-      this._ctx.scene.remove(this._lanes[i].label);
+      gone.push(this._lanes[i].mesh, this._lanes[i].label);
     }
     for (var j = 0; j < this._dividers.length; j++) {
-      this._ctx.scene.remove(this._dividers[j]);
+      gone.push(this._dividers[j]);
+    }
+    // The exciter lives in the same group, so only the lane objects go.
+    for (var k = 0; k < gone.length; k++) {
+      scene.remove(gone[k]);
+      util.disposeObject(gone[k]);
     }
     this._lanes    = [];
     this._dividers = [];
@@ -171,6 +178,11 @@ Shell.register({
 
   destroy: function () {
     this._clearLanes();
+    if (this._exciterMesh) {
+      this._ctx.scene.remove(this._exciterMesh);
+      this._ctx.util.disposeObject(this._exciterMesh);
+      this._exciterMesh = null;
+    }
     if (this._unsubscribeScale) {
       this._unsubscribeScale();
       this._unsubscribeScale = null;

@@ -14,10 +14,6 @@ const ChordBuilderExperiment = {
   _group: null,
   _context: null,
   _unsubscribeScale: null,
-  _onPointerDown: null,
-  _onPointerMove: null,
-  _onPointerUp: null,
-  _onPointerCancel: null,
 
   // --- Note grid (one row per octave, low at the bottom) ---
   _nodes: [],         // { mesh, labelSprite, ghost, midiNote, degree, octave, row, x, y, active, flash, phrasePx, targetColor, labelTargetColor }
@@ -51,7 +47,6 @@ const ChordBuilderExperiment = {
   // { idx, delay } — delay phrases the note later into the step, [0, _maxDelay].
   _chords: null,       // array of arrays of { idx, delay }
   _currentChord: 0,
-  _stateRestored: false,  // gate saves until the stored progression is back
   _panelObjects: [],   // everything the panel owns, for disposal
   _dots: [],           // { mesh, x, y, flash }
   _plus: null,         // { mesh, label, x, y }
@@ -101,18 +96,13 @@ const ChordBuilderExperiment = {
     });
 
     this._rebuild();
-    this._bindEvents();
 
     // Restore the saved progression (persisted in the plugin, saved with
-    // the DAW project). Arrives async; may fire immediately if cached.
+    // the DAW project). The shell calls back synchronously.
     context.store.load((data) => this._restoreState(data));
   },
 
   _restoreState(data) {
-    // From here on it's safe to persist — we're not at risk of clobbering
-    // a stored progression with the boot-time empty one.
-    this._stateRestored = true;
-
     if (!data || !Array.isArray(data.chords)) return;
 
     // Drop malformed entries and node indices that don't fit the current
@@ -143,7 +133,6 @@ const ChordBuilderExperiment = {
   },
 
   _saveState() {
-    if (!this._stateRestored) return;
     this._context.store.save({
       chords: this._chords,
       currentChord: this._currentChord
@@ -151,15 +140,7 @@ const ChordBuilderExperiment = {
   },
 
   _rebuild() {
-    while (this._group.children.length) {
-      const child = this._group.children[0];
-      this._group.remove(child);
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (child.material.map) child.material.map.dispose();
-        child.material.dispose();
-      }
-    }
+    this._context.util.disposeGroup(this._group);
     this._nodes = [];
     this._panelObjects = [];
     this._dots = [];
@@ -256,11 +237,7 @@ const ChordBuilderExperiment = {
     for (let i = 0; i < this._panelObjects.length; i++) {
       const obj = this._panelObjects[i];
       this._group.remove(obj);
-      if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) {
-        if (obj.material.map) obj.material.map.dispose();
-        obj.material.dispose();
-      }
+      this._context.util.disposeObject(obj);
     }
     this._panelObjects = [];
     this._dots = [];
@@ -591,35 +568,6 @@ const ChordBuilderExperiment = {
   // Input
   // ==================================================================
 
-  _bindEvents() {
-    const self = this;
-    const canvas = this._context.renderer.domElement;
-    this._onPointerDown   = function (e) { self._handlePointerDown(e); };
-    this._onPointerMove   = function (e) { self._handlePointerMove(e); };
-    this._onPointerUp     = function (e) { self._handlePointerUp(e); };
-    this._onPointerCancel = function (e) { self._handlePointerCancel(e); };
-    canvas.addEventListener('pointerdown',   this._onPointerDown);
-    canvas.addEventListener('pointermove',   this._onPointerMove);
-    canvas.addEventListener('pointerup',     this._onPointerUp);
-    canvas.addEventListener('pointercancel', this._onPointerCancel);
-  },
-
-  _unbindEvents() {
-    const canvas = this._context.renderer.domElement;
-    if (this._onPointerDown)   canvas.removeEventListener('pointerdown',   this._onPointerDown);
-    if (this._onPointerMove)   canvas.removeEventListener('pointermove',   this._onPointerMove);
-    if (this._onPointerUp)     canvas.removeEventListener('pointerup',     this._onPointerUp);
-    if (this._onPointerCancel) canvas.removeEventListener('pointercancel', this._onPointerCancel);
-  },
-
-  _pointerPos(e) {
-    const rect = this._context.renderer.domElement.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: rect.height - (e.clientY - rect.top)
-    };
-  },
-
   _hitTestNodes(p) {
     const r2 = this._nodeRadius * this._nodeRadius;
     for (let i = 0; i < this._nodes.length; i++) {
@@ -671,9 +619,8 @@ const ChordBuilderExperiment = {
     return null;
   },
 
-  _handlePointerDown(e) {
+  onPointerDown(p, e) {
     if (e.button !== 0) return;
-    const p = this._pointerPos(e);
 
     const panelHit = this._hitTestPanel(p);
     if (panelHit) {
@@ -684,7 +631,6 @@ const ChordBuilderExperiment = {
         this._dotPressX = p.x;
         this._dotPressY = p.y;
         this._draggingDot = -1;
-        try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
         return;
       }
       if (panelHit.type === 'delete')     this._deleteChord(panelHit.index);
@@ -704,12 +650,10 @@ const ChordBuilderExperiment = {
     this._pressPX = p.x;
     this._pressPY = p.y;
     this._draggingNote = -1;
-    try { this._context.renderer.domElement.setPointerCapture(e.pointerId); } catch (err) {}
   },
 
-  _handlePointerUp(e) {
+  onPointerUp(p, e) {
     if (e.button !== 0) return;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
 
     if (this._dotPress !== -1) {
       const pressed  = this._dotPress;
@@ -740,24 +684,20 @@ const ChordBuilderExperiment = {
       return;
     }
 
-    const p = this._pointerPos(e);
     const dx = p.x - this._pressPX;
     const dy = p.y - this._pressPY;
     const t = this._dragThreshold;
     if (dx * dx + dy * dy <= t * t) this._toggleNode(pressed);
   },
 
-  _handlePointerCancel(e) {
+  onPointerCancel(p, e) {
     this._pressNode = -1;
     this._draggingNote = -1;
     this._dotPress = -1;
     this._draggingDot = -1;
-    try { this._context.renderer.domElement.releasePointerCapture(e.pointerId); } catch (err) {}
   },
 
-  _handlePointerMove(e) {
-    const p = this._pointerPos(e);
-
+  onPointerMove(p, e) {
     // Enter a dot-reorder drag: pressed on a chord dot + moved past the
     // threshold. The affordances hide for the duration.
     if (this._dotPress !== -1 && this._draggingDot === -1) {
@@ -778,7 +718,7 @@ const ChordBuilderExperiment = {
       this._dragDotX = Math.max(this._panelStartX - 20, Math.min(spanEnd + 20, p.x));
       this._dragDotTarget = Math.max(0, Math.min(n - 1,
         Math.round((this._dragDotX - this._panelStartX) / this._dotSpacing)));
-      this._context.renderer.domElement.style.cursor = 'grabbing';
+      this._context.setCursor('grabbing');
       return;
     }
 
@@ -804,7 +744,7 @@ const ChordBuilderExperiment = {
       node.phrasePx = Math.max(0, Math.min(this._maxPhrasePx,
         this._dragAnchorPx + (p.x - this._dragStartX)));
       if (entry) entry.delay = (node.phrasePx / this._maxPhrasePx) * this._maxDelay;
-      this._context.renderer.domElement.style.cursor = 'grabbing';
+      this._context.setCursor('grabbing');
       return;
     }
 
@@ -829,18 +769,18 @@ const ChordBuilderExperiment = {
       // Active notes are draggable (phrasing); inactive ones just toggle
       cursor = this._nodes[this._hoveredIndex].active ? 'grab' : 'pointer';
     }
-    this._context.renderer.domElement.style.cursor = cursor;
+    this._context.setCursor(cursor);
   },
 
   // ==================================================================
   // Lifecycle
   // ==================================================================
 
-  // Quantized hook — the shell calls this at every subdivision boundary
-  // while the transport plays (and shows the subdivision selector because
-  // this method exists). The C++ sequencer makes the sound; this is the
-  // visual echo.
-  step(stepIndex) {
+  // Quantized hook — the shell calls this at every step boundary the C++
+  // sequencer reports (and shows the subdivision selector because this
+  // method exists). The C++ sequencer makes the sound; this is the visual
+  // echo.
+  step(stepIndex, played) {
     const n = this._chords.length;
     if (n === 0) return;
     const playing = ((stepIndex % n) + n) % n;
@@ -848,12 +788,13 @@ const ChordBuilderExperiment = {
     const dot = this._dots[playing];
     if (dot) dot.flash = 1;
 
-    // If the playing chord is the one on the grid, pulse its notes too
+    // If the playing chord is the one on the grid, pulse the notes that
+    // actually sounded
     if (playing === this._currentChord) {
       const chord = this._chords[playing];
       for (let i = 0; i < chord.length; i++) {
         const node = this._nodes[chord[i].idx];
-        if (node) node.flash = 1;
+        if (node && played.indexOf(node.midiNote) !== -1) node.flash = 1;
       }
     }
   },
@@ -926,7 +867,6 @@ const ChordBuilderExperiment = {
   },
 
   pause() {
-    this._unbindEvents();
     // Mid-drag phrasing has been mutating the chord entry live — keep it,
     // but make sure it reaches the sequencer/persistence like a normal
     // drag release would.
@@ -938,20 +878,17 @@ const ChordBuilderExperiment = {
     this._hoveredIndex = -1;
     this._hoveredDot = -1;
     this._updateDotAffordances();
-    this._context.renderer.domElement.style.cursor = '';
-    // Silence the shared C++ sequencer while inactive; resume() resends.
-    this._context.midi.setStepSequence([], 150);
   },
 
   resume() {
-    this._bindEvents();
+    // A key or scale change while paused rebuilds the grid, but the midi
+    // handle is inert then, so the shell still holds the old notes.
     this._sendSequence();
   },
 
   destroy() {
-    this._unbindEvents();
     if (this._unsubscribeScale) this._unsubscribeScale();
-    this._context.midi.setStepSequence([], 150);
+    this._context.util.disposeGroup(this._group);
   },
 };
 
