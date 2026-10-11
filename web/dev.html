@@ -60,6 +60,25 @@
 <script src="dev/mock-juce.js"></script>
 <script src="shell.js"></script>
 <script>
+  // The shell keeps its own copy of each registered experiment, so nothing on
+  // the page can reach the live objects. Expose them as
+  // window.__experiments[id] for poking at state from the console.
+  (function () {
+    var register = Shell.register;
+    window.__experiments = {};
+    Shell.register = function (behavior) {
+      if (behavior && behavior.id && typeof behavior.init === 'function') {
+        var init = behavior.init;
+        behavior.init = function () {
+          window.__experiments[behavior.id] = this;
+          return init.apply(this, arguments);
+        };
+      }
+      return register.apply(this, arguments);
+    };
+  })();
+</script>
+<script>
   if (new URLSearchParams(location.search).get('autotest') === '1') {
     var s = document.createElement('script');
     s.src = 'dev/autotest.js';
