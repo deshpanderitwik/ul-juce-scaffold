@@ -62,11 +62,44 @@ namespace
         return e;
     }
 
+    // The beat at which `step`'s note with `delay` triggers. A capped note-off
+    // has to be the very same double as the trigger it ends at, or the two can
+    // truncate to different samples and the old note's off lands after the new
+    // note's on. Every trigger beat and every capped off beat comes from here.
+    // std::fma, because a compiler that contracts a * b + c at one call site and
+    // not at another would hand out two different doubles for the same beat.
+    double triggerBeatOf (int step, double delay, double stepSize) noexcept
+    {
+        const double boundary = static_cast<double> (step) * stepSize;
+
+        return delay > 0.0 ? std::fma (delay, stepSize, boundary) : boundary;
+    }
+
+    // The beat at which a note triggered at `triggerBeat` of `step` ends. A gate
+    // at the cap ends exactly where the same phrasing of the next step triggers.
+    double offBeatOf (int step, double delay, double stepSize, double triggerBeat,
+                      double gateBeats) noexcept
+    {
+        return gateBeats >= stepSize ? triggerBeatOf (step + 1, delay, stepSize)
+                                     : triggerBeat + gateBeats;
+    }
+
+    // A saved sequence passes through JSON text with about 15 significant
+    // digits, so the same delay or gate comes back a few ulps away from the
+    // page's. No edit is that small.
+    bool sameValue (double a, double b) noexcept
+    {
+        constexpr double kTolerance = 1.0e-9;
+
+        const double scale = std::fmax (1.0, std::fmax (std::abs (a), std::abs (b)));
+        return std::abs (a - b) <= kTolerance * scale;
+    }
+
     // Everything but the tag.
     bool sameContent (const Sequence& a, const Sequence& b) noexcept
     {
-        if (a.numSteps != b.numSteps || a.stepsPerBeat != b.stepsPerBeat
-            || a.gateMs != b.gateMs || a.legato != b.legato)
+        if (a.numSteps != b.numSteps || ! sameValue (a.stepsPerBeat, b.stepsPerBeat)
+            || ! sameValue (a.gateMs, b.gateMs) || a.legato != b.legato)
             return false;
 
         for (int i = 0; i < a.numSteps; ++i)
@@ -82,7 +115,7 @@ namespace
                 const StepNote& m = x.notes[idx (j)];
                 const StepNote& n = y.notes[idx (j)];
 
-                if (m.delay != n.delay || m.probability != n.probability
+                if (! sameValue (m.delay, n.delay) || m.probability != n.probability
                     || m.note != n.note || m.velocity != n.velocity)
                     return false;
             }
@@ -134,7 +167,21 @@ double StepSequencer::nextDouble() noexcept
 void StepSequencer::startNote (EventBuffer& out, int sampleOffset, uint8_t note, uint8_t velocity,
                                double offBeat) noexcept
 {
-    const bool full = numPendingOffs >= kMaxPending;
+    // An earlier instance of this pitch that is still sounding ends where the
+    // new one starts, so its note-off cannot land inside the new note. One that
+    // started later in this block than the new note cannot be ended yet (its
+    // note-off would reach the host before its note-on).
+    auto endsHere = [note, sampleOffset] (const PendingOff& off) noexcept
+    {
+        return off.note == note && off.startSample <= sampleOffset;
+    };
+
+    int same = 0;
+    for (int i = 0; i < numPendingOffs; ++i)
+        if (endsHere (pendingOffs[idx (i)]))
+            ++same;
+
+    const bool full = numPendingOffs - same >= kMaxPending;
 
     // Make room by ending the note that has been sounding longest, right where
     // the new one starts. A note that starts later in this block than the new
@@ -152,8 +199,23 @@ void StepSequencer::startNote (EventBuffer& out, int sampleOffset, uint8_t note,
             return;
     }
 
-    if (out.count + (full ? 2 : 1) > kMaxEventsPerBlock)
+    if (out.count + same + (full ? 2 : 1) > kMaxEventsPerBlock)
         return;
+
+    if (same > 0)
+    {
+        int kept = 0;
+        for (int i = 0; i < numPendingOffs; ++i)
+        {
+            const PendingOff off = pendingOffs[idx (i)];
+
+            if (endsHere (off))
+                out.push (makeNoteOff (sampleOffset, note));
+            else
+                pendingOffs[idx (kept++)] = off;
+        }
+        numPendingOffs = kept;
+    }
 
     if (full)
     {
@@ -165,15 +227,15 @@ void StepSequencer::startNote (EventBuffer& out, int sampleOffset, uint8_t note,
     }
 
     out.push (makeNoteOn (sampleOffset, note, velocity));
-    pendingOffs[idx (numPendingOffs++)] = { offBeat, note, sampleOffset };
+    pendingOffs[idx (numPendingOffs++)] = { offBeat, note, sampleOffset, true };
 }
 
-void StepSequencer::addPendingOn (double beat, double gateBeats, uint8_t note, uint8_t velocity) noexcept
+void StepSequencer::addPendingOn (double beat, double offBeat, uint8_t note, uint8_t velocity) noexcept
 {
     if (numPendingOns >= kMaxPending)
         return;   // not sounding yet, so dropping it leaves nothing hanging
 
-    pendingOns[idx (numPendingOns++)] = { beat, gateBeats, note, velocity };
+    pendingOns[idx (numPendingOns++)] = { beat, offBeat, note, velocity };
 }
 
 void StepSequencer::releaseHeld (EventBuffer& out, int sampleOffset) noexcept
@@ -210,7 +272,10 @@ void StepSequencer::rebasePending (double loopLength) noexcept
         pendingOffs[idx (i)].beat -= loopLength;
 
     for (int i = 0; i < numPendingOns; ++i)
-        pendingOns[idx (i)].beat -= loopLength;
+    {
+        pendingOns[idx (i)].beat    -= loopLength;
+        pendingOns[idx (i)].offBeat -= loopLength;
+    }
 }
 
 void StepSequencer::rebaseStepPosition (double beat) noexcept
@@ -297,7 +362,6 @@ void StepSequencer::takeSequence (const Sequence& incoming, const BlockInfo& blo
 
     // Added notes: strike them into the remainder of the step.
     const double stepLen      = 1.0 / current.stepsPerBeat;
-    const double boundaryBeat = static_cast<double> (chordStepIndex) * stepLen;
     const double gateBeats    = limit (0.01, stepLen,
         current.gateMs * 0.001 * (block.bpm / 60.0));
 
@@ -311,14 +375,14 @@ void StepSequencer::takeSequence (const Sequence& incoming, const BlockInfo& blo
         if (p < 1.0 && nextDouble() >= p)
             continue;
 
-        const double triggerBeat = boundaryBeat + sn.delay * stepLen;
-        const double offBeat     = triggerBeat + gateBeats;
+        const double triggerBeat = triggerBeatOf (chordStepIndex, sn.delay, stepLen);
+        const double offBeat     = offBeatOf (chordStepIndex, sn.delay, stepLen, triggerBeat, gateBeats);
 
         if (offBeat <= block.beatPos)
             continue;   // its window in this step already passed
 
         if (triggerBeat > block.beatPos)
-            addPendingOn (triggerBeat, gateBeats, sn.note, sn.velocity);   // fires on time
+            addPendingOn (triggerBeat, offBeat, sn.note, sn.velocity);   // fires on time
         else
             startNote (out, 0, sn.note, sn.velocity, offBeat);
     }
@@ -329,8 +393,6 @@ void StepSequencer::takeSequence (const Sequence& incoming, const BlockInfo& blo
 void StepSequencer::fireStep (int step, double stepSize, double gateBeats, int sampleOffset,
                               EventBuffer& out, StepEventBuffer& steps) noexcept
 {
-    const double boundaryBeat = static_cast<double> (step) * stepSize;
-
     StepEvent event;
     event.index        = step;
     event.stepsPerBeat = current.stepsPerBeat;
@@ -384,11 +446,14 @@ void StepSequencer::fireStep (int step, double stepSize, double gateBeats, int s
 
                 event.played[idx (event.numPlayed++)] = sn.note;
 
+                const double triggerBeat = triggerBeatOf (step, sn.delay, stepSize);
+                const double offBeat     = offBeatOf (step, sn.delay, stepSize, triggerBeat, gateBeats);
+
                 if (sn.delay <= 0.0)
-                    startNote (out, sampleOffset, sn.note, sn.velocity, boundaryBeat + gateBeats);
+                    startNote (out, sampleOffset, sn.note, sn.velocity, offBeat);
                 else
                     // Phrased — trigger later within the step.
-                    addPendingOn (boundaryBeat + sn.delay * stepSize, gateBeats, sn.note, sn.velocity);
+                    addPendingOn (triggerBeat, offBeat, sn.note, sn.velocity);
             }
         }
     }
@@ -449,47 +514,48 @@ void StepSequencer::runSegment (const Segment& segment, const BlockInfo& block, 
         return static_cast<int> (v);
     };
 
-    // Process pending note-offs BEFORE new note-ons so that when the same MIDI
-    // note has a note-off and note-on at the same sample, the off clears first.
-    int kept = 0;
+    // The note-offs that were pending when the segment began and are due by
+    // `beat`. A note struck inside the segment keeps its note-off for the next
+    // pass.
     for (int i = 0; i < numPendingOffs; ++i)
-    {
-        const PendingOff off = pendingOffs[idx (i)];
+        pendingOffs[idx (i)].struck = false;
 
-        if (! (off.beat <= endBeat && out.push (makeNoteOff (sampleFor (off.beat), off.note))))
-            pendingOffs[idx (kept++)] = off;
-    }
-    numPendingOffs = kept;
+    auto releaseDueBy = [&] (double beat) noexcept
+    {
+        int kept = 0;
+        for (int i = 0; i < numPendingOffs; ++i)
+        {
+            const PendingOff off = pendingOffs[idx (i)];
+
+            if (! (! off.struck && off.beat <= beat && out.push (makeNoteOff (sampleFor (off.beat), off.note))))
+                pendingOffs[idx (kept++)] = off;
+        }
+        numPendingOffs = kept;
+    };
 
     const double mult = current.stepsPerBeat;
 
+    double stepSize  = 0.0;
+    double gateBeats = 0.0;
+    int    nextStep  = 0;
+    int    lastStep  = -1;
+
     if (mult > 0.0)
     {
-        const double stepSize = 1.0 / mult;
+        stepSize = 1.0 / mult;
 
         // Gate length from the UI-supplied duration, capped at one full step so
         // a note always ends before the same pitch can retrigger.
-        const double gateBeats = limit (0.01, stepSize,
-            current.gateMs * 0.001 * (block.bpm / 60.0));
+        gateBeats = limit (0.01, stepSize, current.gateMs * 0.001 * (block.bpm / 60.0));
 
         // The step after the last one processed, so a boundary the previous
         // block's end missed by rounding is late rather than lost.
-        int firstStep = hasLastStep ? lastStepIndex + 1
-                                    : toInt (std::ceil (segment.beatStart * mult));
-        const int lastStep = toInt (std::floor (endBeat * mult));
+        nextStep = hasLastStep ? lastStepIndex + 1
+                               : toInt (std::ceil (segment.beatStart * mult));
+        lastStep = toInt (std::floor (endBeat * mult));
 
-        if (static_cast<long long> (lastStep) - firstStep >= kMaxStepsPerSegment)
-            firstStep = lastStep - static_cast<int> (kMaxStepsPerSegment) + 1;
-
-        for (int s = firstStep; s <= lastStep; ++s)
-        {
-            const double boundaryBeat = static_cast<double> (s) * stepSize;
-
-            if (boundaryBeat >= endBeat)
-                break;
-
-            fireStep (s, stepSize, gateBeats, sampleFor (boundaryBeat), out, steps);
-        }
+        if (static_cast<long long> (lastStep) - nextStep >= kMaxStepsPerSegment)
+            nextStep = lastStep - static_cast<int> (kMaxStepsPerSegment) + 1;
     }
     else
     {
@@ -497,21 +563,50 @@ void StepSequencer::runSegment (const Segment& segment, const BlockInfo& block, 
         hasChordStep = false;
     }
 
-    // Fire phrased note-ons whose beat falls inside this segment. Runs after the
-    // boundary loop so a small delay can trigger in the same block it was
-    // scheduled in; runs after the note-off pass so an off and on for the same
-    // pitch at one sample stay off-then-on.
-    kept = 0;
-    for (int i = 0; i < numPendingOns; ++i)
+    // Boundaries and phrased note-ons in the order they happen. A boundary goes
+    // first where the two coincide; a small delay triggers in the block it was
+    // scheduled in. Every note-off due by a strike is sent ahead of it, so an
+    // off and an on of one pitch at one sample stay off-then-on.
+    for (;;)
     {
-        const PendingOn on = pendingOns[idx (i)];
+        bool   haveBoundary = false;
+        double boundaryBeat = 0.0;
 
-        if (on.beat < endBeat)
-            startNote (out, sampleFor (on.beat), on.note, on.velocity, on.beat + on.gateBeats);
+        if (nextStep <= lastStep)
+        {
+            boundaryBeat = triggerBeatOf (nextStep, 0.0, stepSize);
+            haveBoundary = boundaryBeat < endBeat - segment.endMargin;
+        }
+
+        int phrased = -1;
+        for (int i = 0; i < numPendingOns; ++i)
+            if (pendingOns[idx (i)].beat < endBeat
+                && (phrased < 0 || pendingOns[idx (i)].beat < pendingOns[idx (phrased)].beat))
+                phrased = i;
+
+        if (haveBoundary && (phrased < 0 || boundaryBeat <= pendingOns[idx (phrased)].beat))
+        {
+            releaseDueBy (boundaryBeat);
+            fireStep (nextStep++, stepSize, gateBeats, sampleFor (boundaryBeat), out, steps);
+        }
+        else if (phrased >= 0)
+        {
+            const PendingOn on = pendingOns[idx (phrased)];
+
+            for (int i = phrased + 1; i < numPendingOns; ++i)
+                pendingOns[idx (i - 1)] = pendingOns[idx (i)];
+            --numPendingOns;
+
+            releaseDueBy (on.beat);
+            startNote (out, sampleFor (on.beat), on.note, on.velocity, on.offBeat);
+        }
         else
-            pendingOns[idx (kept++)] = on;
+        {
+            break;
+        }
     }
-    numPendingOns = kept;
+
+    releaseDueBy (endBeat);
 }
 
 void StepSequencer::process (const BlockInfo& block, const Sequence* newSequence,
@@ -539,8 +634,14 @@ void StepSequencer::process (const BlockInfo& block, const Sequence* newSequence
 
     if (numSamples <= 0 || ! (block.sampleRate > 0.0))
     {
+        // A new rate has to move the step position even though no time passes.
         if (newSequence != nullptr)
-            current.copyFrom (*newSequence);
+        {
+            if (wasPlaying)
+                takeSequence (*newSequence, block, false, out);
+            else
+                current.copyFrom (*newSequence);
+        }
         return;
     }
 
@@ -618,10 +719,15 @@ void StepSequencer::process (const BlockInfo& block, const Sequence* newSequence
 
             const int endSample = toInt (std::ceil (wrapSample)) - 1;
 
+            // The boundary at the loop end belongs to the next pass, but the
+            // host's loop end and the sequencer's boundary there can be an ulp
+            // apart (a triplet position), the boundary being the smaller.
             segment.beatEnd       = block.loopEnd;
+            segment.endMargin     = halfSample;
             segment.highestSample = endSample < segment.lowestSample ? segment.lowestSample
                                   : (endSample > numSamples - 1 ? numSamples - 1 : endSample);
             runSegment (segment, block, out, steps);
+            segment.endMargin = 0.0;
 
             rebasePending (loopLength);
             rebaseStepPosition (block.loopStart);
@@ -642,6 +748,8 @@ void StepSequencer::process (const BlockInfo& block, const Sequence* newSequence
         if (inLoop && endBeat >= block.loopEnd - kJumpTolerance && endBeat <= block.loopEnd + halfSample)
         {
             segment.beatEnd = endBeat < block.loopEnd ? endBeat : block.loopEnd;
+            if (endBeat >= block.loopEnd - halfSample)
+                segment.endMargin = halfSample;
             wrapPending     = true;
             wrapTarget      = block.loopStart;
             wrapLength      = loopLength;

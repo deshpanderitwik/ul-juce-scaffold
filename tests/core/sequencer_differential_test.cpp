@@ -3,6 +3,7 @@
 #include "legacy_reference.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +31,27 @@
 // that). The reference also never fires a step at a negative index (its "no step yet" marker is -1, which
 // swallows a count-in), whereas the sequencer sounds and reports those steps;
 // sequencer_steps_test.cpp covers count-in.
+//
+// The reference computes a capped note-off and the next step's trigger as two
+// different doubles at 1/8T, so the two can land a sample apart; the sequencer
+// uses one double for both (sequencer_retrigger_test.cpp covers it). At 1/8T
+// the scenarios therefore keep the gate under one step, where the note-off is
+// computed the same way on both sides; every other rate is unchanged.
+//
+// The reference lets the note-off of an earlier instance of a pitch land inside
+// a note that retriggers that pitch. The sequencer ends the earlier instance at
+// the retrigger instead (sequencer_retrigger_test.cpp covers it), so these
+// note-offs are exempt from the comparison and nothing else is: where the
+// sequencer sends a note-off right before a note-on of the same pitch at the
+// same sample, and the reference has that pitch sounding, the reference's own
+// note-off for that earlier instance may be missing later. Every other event
+// is compared exactly, in the order the host's MIDI buffer delivers it: by
+// sample, and by emission order among the events of one pitch at a sample. The
+// reference sends every note-off due in a block ahead of the block's note-ons,
+// whatever their samples, whereas the sequencer sends a note-off ahead of the
+// first strike that follows it in time (so that a strike finds the earlier
+// instance of its pitch still pending); the order of events across samples, and
+// of different pitches at one sample, is not part of what the host sees.
 //
 // The step events cannot be compared with the reference, which has none, so
 // they are checked for consistency instead: consecutive indices, the rate and
@@ -159,9 +181,12 @@ double pickRate (Rng& rng, Flavor flavor)
 }
 
 // On the grid most gates are 2000 ms, which every grid tempo caps at exactly
-// one step; the rest are ordinary.
-double pickGate (Rng& rng, Flavor flavor)
+// one step; the rest are ordinary. At 1/8T the gate stays under a step at every
+// tempo the scenarios use (200 bpm: 100 ms), see the top of this file.
+double pickGate (Rng& rng, Flavor flavor, double stepsPerBeat)
 {
+    if (stepsPerBeat == 3.0)
+        return pickReal (rng, 10.0, 90.0);
     if (flavor == Flavor::Grid && chance (rng, 0.7))
         return 2000.0;
     return pickReal (rng, 10.0, 2000.0);
@@ -171,7 +196,7 @@ void makeSequence (Rng& rng, seq::Sequence& s, Flavor flavor)
 {
     s.numSteps     = pickInt (rng, 1, 16);
     s.stepsPerBeat = pickRate (rng, flavor);
-    s.gateMs       = pickGate (rng, flavor);
+    s.gateMs       = pickGate (rng, flavor, s.stepsPerBeat);
     s.legato       = chance (rng, 0.25);
     fillSteps (rng, s, 0, s.numSteps, flavor);
 }
@@ -230,7 +255,7 @@ void applyEdit (Rng& rng, seq::Sequence& s, bool playing, double beatPos, Flavor
         if (chance (rng, 0.3))
             mutateStep (rng, s.steps[static_cast<size_t> (pickInt (rng, 0, s.numSteps - 1))], flavor);
         if (chance (rng, 0.2))
-            s.gateMs = pickGate (rng, flavor);
+            s.gateMs = pickGate (rng, flavor, s.stepsPerBeat);
     }
     else if (k < 7)
     {
@@ -249,11 +274,13 @@ void applyEdit (Rng& rng, seq::Sequence& s, bool playing, double beatPos, Flavor
     }
     else if (k < 11)
     {
-        s.gateMs = pickGate (rng, flavor);
+        s.gateMs = pickGate (rng, flavor, s.stepsPerBeat);
     }
     else if (k < 13)
     {
         s.stepsPerBeat = pickRate (rng, flavor);   // stopped only
+        if (s.stepsPerBeat == 3.0)
+            s.gateMs = pickGate (rng, flavor, s.stepsPerBeat);
     }
     else
     {
@@ -336,6 +363,7 @@ std::string describe (const seq::MidiEvent* begin, const seq::MidiEvent* end)
 struct Stats
 {
     long scenarios    = 0;
+    long movedOffs    = 0;
     long blocks       = 0;
     long noteOns      = 0;
     long noteOffs     = 0;
@@ -343,6 +371,95 @@ struct Stats
     long legatoBlocks = 0;
     long emptyBlocks  = 0;
 };
+
+// Tracks the one thing the sequencer does on purpose that the reference does
+// not: ending a still-sounding instance of a pitch where the pitch retriggers.
+struct Retriggers
+{
+    std::array<int, 128> sounding {};   // instances the reference has started and not ended
+    std::array<int, 128> owed {};       // reference note-offs for instances the sequencer already ended
+
+    void reset()
+    {
+        sounding.fill (0);
+        owed.fill (0);
+    }
+
+    void track (const seq::MidiEvent& e)
+    {
+        int& n = sounding[static_cast<size_t> (e.note)];
+        n = e.on ? n + 1 : std::max (0, n - 1);
+    }
+};
+
+// The events of one block in the order the host's MIDI buffer delivers them (by
+// sample, then emission order), with the events of different pitches at one
+// sample put in pitch order: only the order of events of one pitch matters there.
+std::vector<seq::MidiEvent> inTimeOrder (const seq::MidiEvent* begin, const seq::MidiEvent* end)
+{
+    std::vector<seq::MidiEvent> events (begin, end);
+
+    std::stable_sort (events.begin(), events.end(), [] (const seq::MidiEvent& a, const seq::MidiEvent& b)
+    {
+        return a.sampleOffset != b.sampleOffset ? a.sampleOffset < b.sampleOffset : a.note < b.note;
+    });
+    return events;
+}
+
+// Whether one block of the sequencer agrees with the reference's, apart from the
+// note-offs of retriggered instances (see the top of this file).
+bool agree (const std::vector<seq::MidiEvent>& expected, const std::vector<seq::MidiEvent>& actual,
+            Retriggers& state, Stats& stats)
+{
+    size_t i = 0;
+    size_t j = 0;
+
+    while (i < expected.size() || j < actual.size())
+    {
+        const bool haveExpected = i < expected.size();
+        const bool haveActual   = j < actual.size();
+
+        if (haveExpected && haveActual && sameEvent (expected[i], actual[j]))
+        {
+            state.track (expected[i++]);
+            ++j;
+            continue;
+        }
+
+        // The reference's note-off for an instance the sequencer ended earlier.
+        if (haveExpected && ! expected[i].on && state.owed[static_cast<size_t> (expected[i].note)] > 0)
+        {
+            --state.owed[static_cast<size_t> (expected[i].note)];
+            state.track (expected[i++]);
+            continue;
+        }
+
+        // The sequencer's note-offs at a retrigger of a pitch the reference has
+        // sounding: one for each earlier instance, right before the note-on.
+        if (haveActual && ! actual[j].on)
+        {
+            const auto n = static_cast<size_t> (actual[j].note);
+
+            size_t k = j;
+            while (k < actual.size() && ! actual[k].on && actual[k].note == actual[j].note
+                   && actual[k].sampleOffset == actual[j].sampleOffset)
+                ++k;
+
+            if (k < actual.size() && actual[k].on && actual[k].note == actual[j].note
+                && actual[k].sampleOffset == actual[j].sampleOffset
+                && state.sounding[n] >= state.owed[n] + static_cast<int> (k - j))
+            {
+                state.owed[n] += static_cast<int> (k - j);
+                stats.movedOffs += static_cast<long> (k - j);
+                j = k;
+                continue;
+            }
+        }
+
+        return false;
+    }
+    return true;
+}
 
 // Returns what is wrong with the step events of one block, or an empty string.
 // `previous` is the last step reported while the transport has been playing.
@@ -450,6 +567,7 @@ std::string runScenario (uint64_t seed, Flavor flavor, Stats& stats)
     seq::StepEventBuffer steps;
     bool haveStep = false;
     int  previousStep = 0;
+    Retriggers retriggers;
 
     for (int b = 0; b < numBlocks; ++b)
     {
@@ -493,9 +611,13 @@ std::string runScenario (uint64_t seed, Flavor flavor, Stats& stats)
         stats.legatoBlocks += (playing && model->legato && model->numSteps > 0) ? 1 : 0;
         stats.emptyBlocks  += (playing && model->numSteps == 0) ? 1 : 0;
 
-        bool same = static_cast<int> (oracleOut.events.size()) == out.count;
-        for (int i = 0; same && i < out.count; ++i)
-            same = sameEvent (oracleOut.events[static_cast<size_t> (i)], out[i]);
+        const auto oracleEvents = inTimeOrder (oracleOut.events.data(), oracleOut.events.data() + oracleOut.events.size());
+        const auto actualEvents = inTimeOrder (out.begin(), out.end());
+
+        const bool same = agree (oracleEvents, actualEvents, retriggers, stats);
+
+        if (! playing)
+            retriggers.reset();   // a stop ends everything on both sides
 
         const std::string stepProblem = checkStepEvents (steps, *model, playing, haveStep, previousStep);
 
@@ -508,10 +630,9 @@ std::string runScenario (uint64_t seed, Flavor flavor, Stats& stats)
                            b, beatPos, bpm, playing ? 1 : 0, numSamples, sampleRate,
                            post ? " (sequence posted)" : "");
 
-            const seq::MidiEvent* oracleBegin = oracleOut.events.data();
             return std::string (head)
-                 + "      oracle:" + describe (oracleBegin, oracleBegin + oracleOut.events.size()) + "\n"
-                 + "      actual:" + describe (out.begin(), out.end())
+                 + "      oracle:" + describe (oracleEvents.data(), oracleEvents.data() + oracleEvents.size()) + "\n"
+                 + "      actual:" + describe (actualEvents.data(), actualEvents.data() + actualEvents.size())
                  + (stepProblem.empty() ? "" : "\n      step events: " + stepProblem);
         }
 
@@ -576,9 +697,10 @@ void runAll (Flavor flavor)
     }
 
     std::printf ("    %ld scenarios, %ld blocks, %ld note-ons, %ld note-offs compared; "
-                 "%ld edits while playing, %ld legato blocks, %ld empty-sequence blocks\n",
+                 "%ld edits while playing, %ld legato blocks, %ld empty-sequence blocks; "
+                 "%ld retrigger note-offs exempt\n",
                  stats.scenarios, stats.blocks, stats.noteOns, stats.noteOffs,
-                 stats.playingEdits, stats.legatoBlocks, stats.emptyBlocks);
+                 stats.playingEdits, stats.legatoBlocks, stats.emptyBlocks, stats.movedOffs);
 
     // The scenarios must actually exercise the sequencer, or agreement means nothing.
     CHECK (stats.noteOns > 50L * n);

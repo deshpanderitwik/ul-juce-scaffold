@@ -151,13 +151,14 @@ private:
         double  beat        = 0.0;
         uint8_t note        = 60;
         int     startSample = -1;   // where it started in the block being built; -1 = an earlier block
+        bool    struck      = false; // started inside the segment being run
     };
 
     // A phrased (delayed) note-on waiting for its trigger beat.
     struct PendingOn
     {
         double  beat      = 0.0;   // when to trigger
-        double  gateBeats = 0.5;   // note length once triggered
+        double  offBeat   = 0.5;   // when it ends
         uint8_t note      = 60;
         uint8_t velocity  = 100;
     };
@@ -173,6 +174,11 @@ private:
         double beatsPerSample = 0.0;
         int    lowestSample   = 0;     // offsets are clamped into this range
         int    highestSample  = 0;
+
+        // A step boundary closer than this to beatEnd belongs to the next
+        // segment. Non-zero where the segment ends at a loop end, whose own
+        // boundary is the loop start's.
+        double endMargin      = 0.0;
     };
 
     // Splitmix64: tiny, allocation-free, and good enough for dice.
@@ -185,18 +191,21 @@ private:
                        EventBuffer& out) noexcept;
 
     // Emit a note-on and remember its note-off. A note whose note-off could not
-    // be remembered is never started, so nothing can be left hanging.
+    // be remembered is never started, so nothing can be left hanging. An earlier
+    // instance of the same pitch that is still sounding is ended first.
     void startNote (EventBuffer& out, int sampleOffset, uint8_t note, uint8_t velocity,
                     double offBeat) noexcept;
 
-    void addPendingOn (double beat, double gateBeats, uint8_t note, uint8_t velocity) noexcept;
+    void addPendingOn (double beat, double offBeat, uint8_t note, uint8_t velocity) noexcept;
 
     // Note-off for every legato note; any whose note-off does not fit in `out`
     // stays held so a later pass can release it.
     void releaseHeld (EventBuffer& out, int sampleOffset) noexcept;
 
-    // Note-offs due in the segment, then the step boundaries inside it, then
-    // the phrased notes that come due.
+    // The step boundaries and phrased notes that fall inside the segment, in
+    // beat order, each preceded by the note-offs due by then: a pitch that
+    // strikes again must find its earlier instance still pending, wherever in
+    // the segment that instance was due to end.
     void runSegment (const Segment& segment, const BlockInfo& block, EventBuffer& out,
                      StepEventBuffer& steps) noexcept;
 

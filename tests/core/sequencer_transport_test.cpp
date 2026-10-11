@@ -1040,6 +1040,86 @@ TEST (sequencer_a_rate_posted_into_a_cleared_sequence_does_not_stall)
     });
 }
 
+TEST (sequencer_a_slower_rate_posted_in_a_block_of_no_samples_does_not_stall)
+{
+    atBlockSizes ([] (int size)
+    {
+        auto host = Host::grid();
+        auto fast = build (8.0, 2000.0, { { 60 } }, false, 1);
+        auto slow = build (1.0, 2000.0, { { 70 }, { 72 } }, false, 2);
+
+        host.run (size, true, fast.get());
+        host.play (337920 - size, size);   // beat 10.3125, half way through fast step 82
+
+        const long long switchedAt = host.elapsed;
+        host.run (0, true, slow.get());
+        host.play (2 * kBeat, size);
+
+        // The next boundary of the new grid is beat 11: step 11, an odd step, so 72.
+        REQUIRE (! host.times (72, true).empty());
+        CHECK_EQ (host.times (72, true).front(), 11 * kBeat);
+
+        const StepRecord* first = nullptr;
+        for (const auto& r : host.stepLog)
+            if (r.blockStart >= switchedAt)
+            {
+                first = &r;
+                break;
+            }
+        REQUIRE (first != nullptr);
+        CHECK_EQ (first->event.index, 11);
+        CHECK_EQ (first->event.stepsPerBeat, 1.0);
+        CHECK_EQ (first->event.tag, 2);
+
+        host.stop();
+        CHECK_BALANCED (host.log);
+    });
+}
+
+TEST (sequencer_a_faster_rate_posted_in_a_block_of_no_samples_starts_at_the_next_boundary)
+{
+    atBlockSizes ([] (int size)
+    {
+        auto host = Host::grid();
+        auto slow = build (1.0, 2000.0, { { 70 }, { 72 } }, false, 1);
+        auto fast = build (4.0, 2000.0, { { 60 } }, false, 2);
+
+        host.run (size, true, slow.get());
+        host.play (337920 - size, size);   // beat 10.3125
+        host.run (0, true, fast.get());
+        host.play (kBeat, size);
+
+        // Quarter-beat steps: the next boundary is beat 10.5, and the steps of the
+        // old count that the new rate has already passed are not played.
+        REQUIRE (! host.times (60, true).empty());
+        CHECK_EQ (host.times (60, true).front(), 10 * kBeat + kBeat / 2);
+        CHECK_EQ (host.times (60, true).size(), 4u);   // beats 10.5, 10.75, 11 and 11.25
+
+        host.stop();
+        CHECK_BALANCED (host.log);
+    });
+}
+
+TEST (sequencer_a_sequence_with_the_same_rate_posted_in_a_block_of_no_samples_is_adopted)
+{
+    auto host = Host::grid();
+    auto one  = build (1.0, 2000.0, { { 70 }, { 72 } }, false, 1);
+    auto two  = build (1.0, 2000.0, { { 70 }, { 74 } }, false, 2);
+
+    host.run (512, true, one.get());
+    host.play (337920 - 512, 512);   // beat 10.3125
+    const long long postedAt = host.elapsed;
+    host.run (0, true, two.get());
+    host.play (2 * kBeat, 512);
+
+    // Step 11 is the odd one: the new chord, struck on the grid, with no stall.
+    REQUIRE (! host.times (74, true).empty());
+    CHECK_EQ (host.times (74, true).front(), 11 * kBeat);
+    for (const auto sample : host.times (72, true))
+        CHECK (sample < postedAt);
+    CHECK_EQ (host.stepLog.back().event.tag, 2);
+}
+
 // ---- tempo ramps --------------------------------------------------------------------
 
 namespace
@@ -1261,4 +1341,57 @@ TEST (sequencer_loops_at_a_sample_rate_that_does_not_divide_the_beat_still_play_
             host.stop();
             CHECK_BALANCED (host.log);
         });
+}
+
+TEST (sequencer_a_loop_end_on_a_triplet_position_does_not_play_the_step_that_belongs_to_the_next_pass)
+{
+    // The host's double for a third of a beat is an ulp above the sequencer's
+    // boundary of the step there (10 * (1 / 3) is below 10 / 3), so the step at
+    // the loop end is a hair before it.
+    struct Loop
+    {
+        double start, end;
+        int    first, last;   // the steps whose boundaries are inside the loop
+    };
+
+    const Loop loops[] = { { 1.0, 10.0 / 3.0, 3, 9 }, { 4.0 / 3.0, 10.0 / 3.0, 4, 9 },
+                           { 0.0, 5.0 / 3.0, 0, 4 },  { 1.0, 7.0 / 3.0, 3, 6 } };
+
+    for (const auto& style : kStyles)
+        for (const auto& loop : loops)
+            atBlockSizes ([&style, &loop] (int size)
+            {
+                Host host;
+                host.sampleRate = 48000.0;
+                host.bpm        = 117.0;
+                host.looping    = true;
+                host.loopStart  = loop.start;
+                host.loopEnd    = loop.end;
+                host.loopStyle  = style.style;
+                host.beatPos    = loop.start;
+
+                auto s = build (3.0, 100.0, { { 60 } });
+
+                const auto pass = static_cast<long long> ((loop.end - loop.start) * 48000.0 * 60.0 / 117.0);
+                host.run (size, true, s.get());
+                host.play (5 * pass / 2, size);   // two and a half passes
+
+                std::vector<int> indices;
+                for (const auto& r : host.stepLog)
+                    indices.push_back (r.event.index);
+
+                REQUIRE (indices.size() > static_cast<size_t> (2 * (loop.last - loop.first + 1)));
+                CHECK_EQ (indices.front(), loop.first);
+
+                for (size_t i = 0; i < indices.size(); ++i)
+                {
+                    CHECK (indices[i] >= loop.first && indices[i] <= loop.last);
+
+                    if (i > 0)
+                        CHECK_EQ (indices[i], indices[i - 1] == loop.last ? loop.first : indices[i - 1] + 1);
+                }
+
+                host.stop();
+                CHECK_BALANCED (host.log);
+            });
 }

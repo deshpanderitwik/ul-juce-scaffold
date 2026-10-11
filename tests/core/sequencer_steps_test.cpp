@@ -1,5 +1,8 @@
 #include "sequencer_support.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 // The step events: the UI's only clock, and the identical-resend guarantee that
 // goes with it.
 using namespace seqtest;
@@ -194,9 +197,51 @@ struct Outcome
     long long               resendAt = 0;   // start of the block that carried the resend
 };
 
-// Plays a sequence for a while on the exact grid. With `resend`, the same
-// content comes in again with a different tag in the middle of a step.
-Outcome playWithResend (const seq::Sequence& sequence, bool resend, int size)
+enum class Resend
+{
+    None,
+    Identical,     // the same content again, with another tag
+    ThroughText,   // the same content after a trip through JSON text, as a saved sequence comes back
+    Nudged         // a real edit: one delay a millionth of a step later
+};
+
+// The number as text with about 15 significant digits and back.
+double throughText (double v)
+{
+    char text[64];
+    std::snprintf (text, sizeof text, "%.15g", v);
+    return std::strtod (text, nullptr);
+}
+
+void sendThroughText (seq::Sequence& s)
+{
+    s.stepsPerBeat = throughText (s.stepsPerBeat);
+    s.gateMs       = throughText (s.gateMs);
+
+    for (int i = 0; i < s.numSteps; ++i)
+        for (int j = 0; j < s.steps[static_cast<size_t> (i)].numNotes; ++j)
+        {
+            auto& delay = s.steps[static_cast<size_t> (i)].notes[static_cast<size_t> (j)].delay;
+            delay = throughText (delay);
+        }
+}
+
+bool sameBits (const seq::Sequence& a, const seq::Sequence& b)
+{
+    if (a.stepsPerBeat != b.stepsPerBeat || a.gateMs != b.gateMs)
+        return false;
+
+    for (int i = 0; i < a.numSteps; ++i)
+        for (int j = 0; j < a.steps[static_cast<size_t> (i)].numNotes; ++j)
+            if (a.steps[static_cast<size_t> (i)].notes[static_cast<size_t> (j)].delay
+                != b.steps[static_cast<size_t> (i)].notes[static_cast<size_t> (j)].delay)
+                return false;
+    return true;
+}
+
+// Plays a sequence for a while on the exact grid. With a resend, the content
+// comes in again with a different tag in the middle of a step.
+Outcome playWithResend (const seq::Sequence& sequence, Resend resend, int size)
 {
     auto host = Host::grid();
     host.sequencer->setSeed (99);
@@ -206,12 +251,18 @@ Outcome playWithResend (const seq::Sequence& sequence, bool resend, int size)
 
     const long long resendAt = host.elapsed;
 
-    if (resend)
+    if (resend != Resend::None)
     {
-        seq::Sequence again;
-        again.copyFrom (sequence);
-        again.tag = sequence.tag + 1;
-        host.run (size, true, &again);
+        auto again = std::make_unique<seq::Sequence>();
+        again->copyFrom (sequence);
+        again->tag = sequence.tag + 1;
+
+        if (resend == Resend::ThroughText)
+            sendThroughText (*again);
+        if (resend == Resend::Nudged && again->numSteps > 0 && again->steps[0].numNotes > 0)
+            again->steps[0].notes[0].delay += 1.0e-6;
+
+        host.run (size, true, again.get());
     }
     else
     {
@@ -224,12 +275,12 @@ Outcome playWithResend (const seq::Sequence& sequence, bool resend, int size)
     return { host.log, host.stepLog, resendAt };
 }
 
-void checkResendChangesOnlyTheTag (const seq::Sequence& sequence)
+void checkResendChangesOnlyTheTag (const seq::Sequence& sequence, Resend kind = Resend::Identical)
 {
-    atBlockSizes ([&sequence] (int size)
+    atBlockSizes ([&sequence, kind] (int size)
     {
-        const auto plain  = playWithResend (sequence, false, size);
-        const auto resent = playWithResend (sequence, true, size);
+        const auto plain  = playWithResend (sequence, Resend::None, size);
+        const auto resent = playWithResend (sequence, kind, size);
 
         CHECK_EQ (plain.resendAt % 16384 != 0, true);   // really in the middle of a step
         REQUIRE (plain.midi.size() == resent.midi.size());
@@ -279,4 +330,51 @@ TEST (sequencer_identical_resend_is_silent_in_legato_mode)
 TEST (sequencer_identical_resend_of_an_empty_sequence_is_silent)
 {
     checkResendChangesOnlyTheTag (*build (2.0, 150.0, {}, false, 5));
+}
+
+namespace
+{
+
+// A phrased note (62) that rings 8/9 of a step into the next step, where a
+// changed sequence would silence it, and numbers that do not survive text:
+// thirds and ninths, and a rate an ulp above 2.
+std::unique_ptr<seq::Sequence> sequenceWithAwkwardNumbers()
+{
+    return build (2.0000000000000004, 1000.0 / 3.0,
+                  { { N (60, 1.0 / 9.0), N (64, 1.0 / 3.0) }, { N (62, 8.0 / 9.0) } }, false, 5);
+}
+
+}
+
+TEST (sequencer_identical_resend_after_a_trip_through_text_is_silent)
+{
+    auto s = sequenceWithAwkwardNumbers();
+
+    // The test means something only if the numbers do come back different.
+    auto text = std::make_unique<seq::Sequence>();
+    text->copyFrom (*s);
+    sendThroughText (*text);
+    CHECK (! sameBits (*s, *text));
+
+    checkResendChangesOnlyTheTag (*s, Resend::ThroughText);
+}
+
+TEST (sequencer_a_delay_edited_by_a_millionth_of_a_step_is_an_edit)
+{
+    // The same scenario with a real (if tiny) edit: the reconciliation runs and
+    // silences the ringing note, so the output differs from the plain run.
+    auto s = sequenceWithAwkwardNumbers();
+
+    atBlockSizes ([&s] (int size)
+    {
+        const auto plain  = playWithResend (*s, Resend::None, size);
+        const auto edited = playWithResend (*s, Resend::Nudged, size);
+
+        bool differs = plain.midi.size() != edited.midi.size();
+        for (size_t i = 0; ! differs && i < plain.midi.size(); ++i)
+            differs = plain.midi[i].sample != edited.midi[i].sample
+                   || plain.midi[i].event.note != edited.midi[i].event.note
+                   || plain.midi[i].event.on != edited.midi[i].event.on;
+        CHECK (differs);
+    });
 }
