@@ -425,6 +425,7 @@ TEST (processor_gated_immediate_note_starts_in_its_block_and_ends_on_time)
 TEST (processor_held_immediate_note_is_released_by_page_loaded)
 {
     Host host;
+    host.blocks (1);   // the first block after prepare discards what was queued before it
     host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 60));
     host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 64));
     host.blocks (4);
@@ -444,6 +445,7 @@ TEST (processor_held_immediate_note_is_released_when_the_editor_goes_away)
 {
     Host host;
     host.processor->editorAttached();
+    host.blocks (1);   // the first block after prepare discards what was queued before it
     host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 60));
     host.blocks (2);
 
@@ -529,6 +531,7 @@ TEST (processor_bypass_releases_everything_once_and_stays_silent)
 {
     Host host;
     loadState (*host.processor, persistedBlob ("v2"));
+    host.blocks (1);   // the first block after prepare discards what was queued before it
     host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 72));
 
     host.head.playing = true;
@@ -560,6 +563,7 @@ TEST (processor_bypass_releases_everything_once_and_stays_silent)
 TEST (processor_prepare_to_play_releases_what_was_sounding)
 {
     Host host;
+    host.blocks (1);   // the first block after prepare discards what was queued before it
     host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 60));
     host.blocks (2);
     CHECK_EQ (host.count (true), 1);
@@ -570,9 +574,88 @@ TEST (processor_prepare_to_play_releases_what_was_sounding)
     CHECK (host.balanced());
 }
 
+TEST (processor_notes_queued_while_the_host_was_not_processing_are_dropped_on_resume)
+{
+    Host host;
+    host.blocks (1);
+
+    // The host stops calling processBlock, the page keeps playing, then the host
+    // prepares again and resumes.
+    host.processor->pushImmediate (immediate (seq::ImmediateEvent::Note, 60, 200.0f));
+    host.processor->pushImmediate (immediate (seq::ImmediateEvent::Note, 64, 200.0f));
+    host.processor->pushImmediate (immediate (seq::ImmediateEvent::Note, 67, 200.0f));
+    host.processor->prepareToPlay (kRate, kBlock);
+    host.blocks (40);
+    CHECK_EQ (host.log.size(), size_t (0));
+
+    // Notes played after the resume sound normally.
+    const long long arrival = host.clock;
+    host.processor->pushImmediate (immediate (seq::ImmediateEvent::Note, 72, 200.0f));
+    host.blocks (40);
+    REQUIRE (host.log.size() == 2);
+    CHECK_EQ (host.log[0].note, 72);
+    CHECK_EQ (host.log[0].time, arrival);
+    CHECK (host.balanced());
+}
+
+TEST (processor_a_panic_raised_while_the_host_was_not_processing_does_not_cut_later_notes)
+{
+    Host host;
+    host.blocks (1);
+
+    for (int i = 0; i < PluginProcessor::kImmediateQueueCapacity; ++i)
+        host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 40 + i % 40));
+    host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOff, 41));    // dropped: sets the panic
+    host.processor->prepareToPlay (kRate, kBlock);
+    host.blocks (1);
+    CHECK_EQ (host.log.size(), size_t (0));
+
+    // The panic went with the queue: a note played now is not released early.
+    host.processor->pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 90));
+    host.blocks (4);
+    CHECK_EQ (host.log.size(), size_t (1));
+    CHECK (host.log[0].on);
+}
+
+TEST (processor_first_block_reserves_the_host_midi_buffer_for_a_dense_burst)
+{
+    // The VST3 wrapper hands the same MidiBuffer to every block, sized for 2048
+    // bytes. Its storage address shows whether a burst had to grow it.
+    PluginProcessor processor;
+    FakePlayHead head;
+    processor.setPlayHead (&head);
+    processor.prepareToPlay (kRate, kBlock);
+
+    juce::AudioBuffer<float> audio { 2, kBlock };
+    juce::MidiBuffer midi;
+    midi.ensureSize (2048);
+
+    processor.processBlock (audio, midi);   // the first block after prepare
+
+    processor.pushImmediate (immediate (seq::ImmediateEvent::NoteOn, 60));
+    processor.processBlock (audio, midi);
+    REQUIRE (! midi.isEmpty());
+    const auto* storage = (*midi.begin()).data;
+
+    // More note events than 2048 bytes hold (9 bytes each).
+    for (int i = 0; i < PluginProcessor::kImmediateQueueCapacity - 1; ++i)
+        processor.pushImmediate (immediate (seq::ImmediateEvent::NoteOn, i % 128));
+    processor.processBlock (audio, midi);
+
+    int events = 0;
+    for (const auto meta : midi)
+    {
+        (void) meta;
+        ++events;
+    }
+    REQUIRE (events > 2048 / 9);
+    CHECK ((*midi.begin()).data == storage);
+}
+
 TEST (processor_a_full_immediate_queue_cannot_leave_a_note_stuck)
 {
     Host host;
+    host.blocks (1);   // the first block after prepare discards what was queued before it
 
     // Fill the queue (nothing drains it), then lose a note-off.
     for (int i = 0; i < PluginProcessor::kImmediateQueueCapacity; ++i)

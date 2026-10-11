@@ -61,7 +61,9 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 }
 
 // =============================================================================
-// Audio thread helpers — nothing here allocates, locks or does I/O.
+// Audio thread helpers — nothing here allocates, locks or does I/O, with one
+// exception: the first block after prepareToPlay grows the host's MidiBuffer
+// (see processBlock).
 // =============================================================================
 void PluginProcessor::readPlayhead (seq::BlockInfo& block)
 {
@@ -133,6 +135,11 @@ namespace
 {
     // MidiBuffer keeps insertion order for events at the same sample, which is
     // what keeps a note-off ahead of the note-on that retriggers it.
+
+    // MidiBuffer stores a note event as its 3 data bytes behind an int32 sample
+    // position and a uint16 length.
+    constexpr size_t kMidiBytesPerNoteEvent = 3 + sizeof (juce::int32) + sizeof (juce::uint16);
+
     void appendTo (juce::MidiBuffer& midi, const seq::EventBuffer& events, int numSamples)
     {
         const int lastSample = std::max (numSamples - 1, 0);
@@ -174,6 +181,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     {
         sequencer.flush (events, 0);
         scheduler.releaseAll (events, 0);
+
+        // Notes queued while the host was not processing are dropped rather than
+        // all sounding together at the first sample, after the release above has
+        // already ended everything.
+        panic.store (false, std::memory_order_relaxed);
+        if (const int numReady = immediateFifo.getNumReady(); numReady > 0)
+            immediateFifo.read (numReady);
+
+        // The host's buffer is sized for far fewer events than a dense block can
+        // emit. Growing it here, in a block that is not steady state, keeps
+        // appendTo from reallocating it mid-burst. clear() keeps the storage.
+        midiMessages.ensureSize (static_cast<size_t> (seq::kMaxEventsPerBlock) * kMidiBytesPerNoteEvent);
     }
 
     // A freshly posted sequence is taken with a try-lock so the audio thread
