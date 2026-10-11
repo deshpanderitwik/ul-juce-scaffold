@@ -45,6 +45,15 @@
       files = ['dev/spy.js'].concat(files || ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js']);
     }
     if (files) window.SHELL_CONFIG = { experimentFiles: files };
+
+    // A hidden tab gets no animation frames, which would stall the shell's
+    // loop (and the self-test with it). Timers still run, so fall back to one
+    // while the page is hidden.
+    var nativeRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = function (cb) {
+      if (!document.hidden) return nativeRaf(cb);
+      return setTimeout(function () { cb(performance.now()); }, 16);
+    };
   })();
 </script>
 <script src="three.min.js"></script>
