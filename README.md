@@ -56,7 +56,7 @@ An experiment calls `Shell.register({ id, name, description, init, update, ... }
 - `store`: `save` / `load` for per-experiment state kept in the DAW project.
 - `getTransport()`, `getSize()`, `getSubdivision()`, `getStepIndex()`, `setCursor()`, and `util.disposeGroup` / `util.disposeObject` for cleaning up Three.js objects.
 
-Optional hooks: `step(stepIndex, played)` for each step the C++ sequencer plays, `onSubdivisionChange`, `pause` / `resume` / `destroy`, and pointer hooks (`onPointerDown`, `onPointerMove`, `onPointerUp`, `onPointerCancel`, `onDoubleClick`) that receive world coordinates. The shell drives `update(delta, transport)` every frame and owns the render loop and all input listeners; experiments never call `requestAnimationFrame`, `renderer.render()` or `addEventListener` for pointer input.
+Optional hooks: `step(stepIndex, played)` for each step the C++ sequencer plays, `onSubdivisionChange`, `pause` / `resume` / `destroy`, and pointer hooks (`onPointerDown`, `onPointerMove`, `onPointerUp`, `onPointerCancel`, `onDoubleClick`, `onWheel`) that receive world coordinates. The shell drives `update(delta, transport)` every frame and owns the render loop and all input listeners; experiments never call `requestAnimationFrame`, `renderer.render()` or `addEventListener` for pointer input.
 
 The full contract, with the details that are easy to get wrong, is in [CLAUDE.md](CLAUDE.md).
 

@@ -22,7 +22,7 @@
   Browser harness: the same page as index.html, with a mock JUCE backend.
   Query parameters:
     only=<id>   load just <id>.js
-    all=1       load all seven experiment files, hidden ones included
+    all=1       load every experiment file, hidden ones included
     probe=1     load just dev/probe.js
     panel=0     hide the control panel
     autotest=1  run the self-test and write the result into #autotest-result
@@ -31,7 +31,7 @@
   (function () {
     var q = new URLSearchParams(location.search);
     var all = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js',
-               'scratch.js', 'random-walker.js', 'scale-flick.js'];
+               'exploration-1.js', 'scratch.js', 'random-walker.js', 'scale-flick.js'];
     var files = null;
     if (q.get('probe') === '1') {
       files = ['dev/probe.js'];
@@ -42,7 +42,7 @@
     }
     if (q.get('autotest') === '1') {
       // The spy goes first so it can see every experiment register.
-      files = ['dev/spy.js'].concat(files || ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js']);
+      files = ['dev/spy.js'].concat(files || ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js', 'exploration-1.js']);
     }
     if (files) window.SHELL_CONFIG = { experimentFiles: files };
 

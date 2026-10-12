@@ -18,12 +18,14 @@ Shell.register({
   step?(stepIndex, played),
   onSubdivisionChange?(sub),
   pause?(), resume?(), destroy?(),
-  onPointerDown?(p, e), onPointerMove?(p, e), onPointerUp?(p, e), onPointerCancel?(p, e), onDoubleClick?(p, e)
+  onPointerDown?(p, e), onPointerMove?(p, e), onPointerUp?(p, e), onPointerCancel?(p, e), onDoubleClick?(p, e),
+  onWheel?(p, e)
 })
 ```
 
 Metadata
 - `showOctave: false` hides the octave picker (for experiments that span a fixed range).
+- `showSubdivision: false` hides the subdivision selector for an experiment that defines `step` but fixes its own step size (give it a one-entry `subdivisions` list).
 - `subdivisions: ['1/4', '1/8', ...]` is the list the subdivision selector offers. Default `['1/4', '1/8', '1/8T', '1/16']`. Keys: `1bar` (one step per 4/4 bar), `1/2`, `1/4`, `1/8`, `1/8T`, `1/16`.
 - The subdivision selector appears only for experiments that define `step`. The sequence sent to C++ always uses the shell's current subdivision, selector visible or not.
 
@@ -38,6 +40,7 @@ Hooks
 Input (the shell owns it)
 - The shell listens on the canvas once and calls the pointer hooks of the active experiment only. `p = { x, y }` is in world coordinates: origin bottom-left, same space as mesh positions, one unit per CSS pixel. `e` is the original event (`e.button`, `e.shiftKey`, `e.pointerId`, ...).
 - The shell captures the pointer on pointerdown, so drags keep reporting over the top bar and outside the canvas. Hover moves (no button) are delivered too.
+- `onWheel(p, e)` receives wheel and two-finger scroll events over the canvas (`e.deltaX`, `e.deltaY` in pixels). The shell suppresses the page's own scrolling.
 - An experiment must not add or remove DOM listeners, call `setPointerCapture`, or convert client coordinates. The top bar overlays the top of the canvas (leave about 50 units).
 - `ctx.setCursor(css)` sets the cursor; the shell clears it on deactivation.
 
@@ -138,7 +141,7 @@ Deeper sequencer fuzz:     SEQ_DIFF_SEEDS=12000 SEQ_INVARIANT_SEEDS=40000 ./buil
 Browser harness:           serve the repo root (python3 -m http.server <port>) and open /web/dev.html
 ```
 
-Harness query parameters: `only=<id>` (load just `<id>.js`), `all=1` (all seven experiment files, hidden ones included), `probe=1` (just `dev/probe.js`), `autotest=1` (run the self-test; the result is written to `#autotest-result` and the page title becomes `AUTOTEST PASS` or `AUTOTEST FAIL`), `panel=0` (hide the control panel), `stateDelay=<ms>` (delay the host's `state` reply), `seed=<json>` (start the mock from `{ web: { <key>: <json string> }, sequence: <setStepSequence payload C++ is already playing> | null }` instead of `sessionStorage`; a seeded page neither reads nor writes storage), `probeQuiet=1` (with `probe=1`: the probe experiment stores no sequence of its own). The self-test uses `seed` to plant saved shell state in iframes. The page is `index.html` with a mock JUCE backend (`web/dev/mock-juce.js`) that simulates the transport and the C++ sequencer, checks every message the page sends against `contract.json`, and shows Play/Stop, BPM and a violation count. The repo root must be served because the mock loads the fixture from `tests/`. `http.server` sends no cache headers, so hard-reload after editing a file or the browser may run the old one. Nothing under `web/dev/` or `web/dev.html` is bundled into the plugin. The mock keeps its saved state in the harness tab's `sessionStorage`; experiments never touch storage themselves.
+Harness query parameters: `only=<id>` (load just `<id>.js`), `all=1` (every experiment file, hidden ones included), `probe=1` (just `dev/probe.js`), `autotest=1` (run the self-test; the result is written to `#autotest-result` and the page title becomes `AUTOTEST PASS` or `AUTOTEST FAIL`), `panel=0` (hide the control panel), `stateDelay=<ms>` (delay the host's `state` reply), `seed=<json>` (start the mock from `{ web: { <key>: <json string> }, sequence: <setStepSequence payload C++ is already playing> | null }` instead of `sessionStorage`; a seeded page neither reads nor writes storage), `probeQuiet=1` (with `probe=1`: the probe experiment stores no sequence of its own). The self-test uses `seed` to plant saved shell state in iframes. The page is `index.html` with a mock JUCE backend (`web/dev/mock-juce.js`) that simulates the transport and the C++ sequencer, checks every message the page sends against `contract.json`, and shows Play/Stop, BPM and a violation count. The repo root must be served because the mock loads the fixture from `tests/`. `http.server` sends no cache headers, so hard-reload after editing a file or the browser may run the old one. Nothing under `web/dev/` or `web/dev.html` is bundled into the plugin. The mock keeps its saved state in the harness tab's `sessionStorage`; experiments never touch storage themselves.
 
 CMake options:
 - `SCAFFOLD_COPY_PLUGIN` (default ON): installs the VST3 into `~/Library/Audio/Plug-Ins/VST3` after each build. Pass `-DSCAFFOLD_COPY_PLUGIN=OFF` to build without touching the copy a running DAW has loaded.
@@ -149,7 +152,7 @@ Options are cached per build directory: `grep SCAFFOLD_ build/CMakeCache.txt` sh
 
 ## Workflow facts
 
-- A Debug build serves `web/` from disk, so a JS-only change needs just the reload button (the circular arrow) in the plugin's top bar.
+- A Debug build serves `web/` from disk, and the shell reloads the page by itself within a couple of seconds of any loaded script changing, so a JS-only change needs nothing else. The reload button (the circular arrow) in the plugin's top bar does the same by hand. The sequencer keeps playing through a reload.
 - A C++ change needs the build AND the plugin device re-added in Ableton (or Ableton restarted). The reload button does not reload the binary, and a stale binary typically shows up as silent or garbage MIDI.
 - After an Xcode / macOS SDK update the build can fail with "'cstring' file not found" or "no such sysroot directory". Fix it without wiping the build directory:
   ```

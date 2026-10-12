@@ -301,11 +301,11 @@
 
   const SCALES = {
     'major':            [0, 2, 4, 5, 7, 9, 11],
-    'dorian':           [0, 2, 3, 5, 7, 9, 10],
+    'minor':            [0, 2, 3, 5, 7, 8, 10],
     'phrygian':         [0, 1, 3, 5, 7, 8, 10],
     'lydian':           [0, 2, 4, 6, 7, 9, 11],
     'mixolydian':       [0, 2, 4, 5, 7, 9, 10],
-    'minor':            [0, 2, 3, 5, 7, 8, 10],
+    'dorian':           [0, 2, 3, 5, 7, 9, 10],
     'locrian':          [0, 1, 3, 5, 6, 8, 10],
     'pentatonic-major': [0, 2, 4, 7, 9],
     'pentatonic-minor': [0, 3, 5, 7, 10],
@@ -314,11 +314,11 @@
 
   const SCALE_DISPLAY_NAMES = {
     'major':            'Major',
-    'dorian':           'Dorian',
+    'minor':            'Minor',
     'phrygian':         'Phrygian',
     'lydian':           'Lydian',
     'mixolydian':       'Mixolydian',
-    'minor':            'Minor',
+    'dorian':           'Dorian',
     'locrian':          'Locrian',
     'pentatonic-major': 'Pent. Major',
     'pentatonic-minor': 'Pent. Minor',
@@ -441,7 +441,7 @@
   // (id, name, description) via Shell.register(behavior). This list only
   // tells the loader which scripts to fetch and in what order.
   // ========================================================================
-  const EXPERIMENT_FILES = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js'];
+  const EXPERIMENT_FILES = ['test.js', 'scribbler.js', 'graph.js', 'chord-builder.js', 'exploration-1.js'];
 
   // Shelved — files stay in web/ but aren't loaded, so they don't appear in
   // the selector. Move a name back into EXPERIMENT_FILES to bring it back.
@@ -698,10 +698,13 @@
     lastStepIndex = -1;
     scene.add(entry.group);
 
-    // Show/hide subdivision selector based on whether experiment is quantized
+    // Show/hide subdivision selector based on whether experiment is quantized.
+    // One that follows the sequencer's steps but fixes its own step size can
+    // opt out of the selector.
     var isQuantized = typeof entry.experiment.step === 'function';
-    divider2.style.display = isQuantized ? '' : 'none';
-    subdivisionSelect.style.display = isQuantized ? '' : 'none';
+    var showSubdivision = isQuantized && entry.experiment.showSubdivision !== false;
+    divider2.style.display = showSubdivision ? '' : 'none';
+    subdivisionSelect.style.display = showSubdivision ? '' : 'none';
     if (isQuantized) {
       rebuildSubdivisionOptions(entry.experiment.subdivisions || DEFAULT_SUBDIVISIONS,
                                 subdivisionByExperiment.get(id));
@@ -926,6 +929,13 @@
   canvas.addEventListener('pointercancel', function (e) { forwardPointer('onPointerCancel', e); });
   canvas.addEventListener('dblclick',      function (e) { forwardPointer('onDoubleClick', e); });
 
+  // The wheel (or a two-finger scroll) goes to the active experiment too. The
+  // page itself never scrolls, so the default is always suppressed.
+  canvas.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    forwardPointer('onWheel', e);
+  }, { passive: false });
+
   // ========================================================================
   // Animation loop
   // ========================================================================
@@ -1002,6 +1012,42 @@
       scriptsLoaded = true;
       boot();
     });
+
+    watchSources(['shell.js'].concat(files));
   })();
+
+  // ========================================================================
+  // Reload when a source file changes
+  // ========================================================================
+  // When the page is served from the source tree, an edit to any script it is
+  // running reloads it, so nobody has to click into the plugin window while
+  // working on an experiment. The sequencer keeps playing through a reload.
+  // Where the files never change (a build serving its bundled copy) every
+  // check simply finds the same text.
+  function watchSources(files) {
+    const seen = new Map();   // file -> the text last fetched
+
+    async function check() {
+      for (const file of files) {
+        let text;
+        try {
+          const response = await fetch(file, { cache: 'no-store' });
+          if (!response.ok) continue;
+          text = await response.text();
+        } catch (e) {
+          return;   // this page cannot fetch its own sources: stop watching
+        }
+
+        if (seen.has(file) && seen.get(file) !== text) {
+          location.reload();
+          return;
+        }
+        seen.set(file, text);
+      }
+      setTimeout(check, 1500);
+    }
+
+    setTimeout(check, 1500);
+  }
 
 })();
