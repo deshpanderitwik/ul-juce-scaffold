@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rows</title>
+</head>
+<body>
+<script src="../runtime.js"></script>
+<script src="../theme.js"></script>
+<script src="../bar.js"></script>
+<script src="../roll.js"></script>
+<script>
+// The structure of a piano roll forms, while the music plays. Picks up on
+// the frame after 005's last, the playhead arriving back on the one at
+// tempo, and keeps playing throughout. On that downbeat the rows grow out
+// of the strip, up and down at once, the nearest first, each with a little
+// spring. The strip stays exactly where it is and becomes the middle row,
+// F: the notes entered on the grid are all Fs, still lighting up as the
+// playhead passes through them. The rows start as tall as the cells and narrow toward
+// piano-roll rows as more of them open, so the roll only ever grows. The
+// columns run the full height, and the playhead stretches with them. Then
+// the keyboard slides out on the left, one key per row from the bottom up,
+// and the white-key rows lift faintly off the black. Two bars long, so it
+// ends on the next downbeat. The notes do not move yet: 007 moves them.
+//
+// Pure: every frame is computed from ctx.t alone, the playhead from the
+// clock shared with 005 (Bar.Play).
+(() => {
+'use strict';
+
+const Play = Bar.Play;
+const UNFOLD_AT = 0;      // on the downbeat
+const STAGGER   = 0.1;    // between a pair of rows and the next pair out
+const KEYS_AT   = 1.5;    // the keyboard, bottom key first
+const KEY_GAP   = 0.04;
+const KEY_IN    = 0.5;
+const SHADE_AT  = 2.0;
+const SHADE_IN  = 0.6;
+
+// A softer spring than the cells': about 18% overshoot.
+const open = (s, util) => util.spring(s, 7, 13);
+
+Animation({
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  duration: Play.ROWS_FOR,
+
+  draw(ctx) {
+    const { g, width: W, height: H, t, util } = ctx;
+    g.fillStyle = Theme.bg;
+    g.fillRect(0, 0, W, H);
+
+    // How open each row is, the strip's neighbours first, and one height for
+    // all of them that narrows from a cell's to a row's as they open.
+    const opened = [];
+    for (let i = 0; i < Roll.ROWS; i++) {
+      const out = Math.abs(i - Roll.STRIP_ROW);
+      opened[i] = out === 0 ? 1 : open(t - (UNFOLD_AT + (out - 1) * STAGGER), util);
+    }
+    const sum = opened.reduce((a, b) => a + b, 0) - 1;
+    const rowH = util.lerp(Bar.CELL, Roll.ROW, util.clamp(sum / (Roll.ROWS - 1)));
+    const heights = opened.map((o) => rowH * o);
+
+    // The strip stays centred on the bar's line; the roll is stacked around it.
+    let base = Bar.cy(H) + heights[Roll.STRIP_ROW] / 2;
+    for (let i = 0; i < Roll.STRIP_ROW; i++) base += heights[i];
+    const L = Roll.layout(heights, H, base);
+
+    Roll.drawGrid(g, W, H, L, util.ease((t - SHADE_AT) / SHADE_IN));
+
+    const s = t + Play.START.rows;
+    const x = Bar.x0(W) + util.mod(Play.travelled(s), Bar.STEPS) * Bar.CELL;
+    Bar.drawWake(g, W, x, Play.speed(s), L.gridTop, L.total);
+
+    // The notes stay in the strip's row, narrow with it, and keep playing.
+    const side = Bar.CELL - 2 * Bar.FILL_INSET;
+    for (const step of Bar.RHYTHM) {
+      Bar.drawPlayedNote(g, W, step, 1, L.mid[Roll.STRIP_ROW], side * rowH / Bar.CELL, s);
+    }
+
+    Roll.drawKeys(g, W, H, L, (i) => util.easeOut((t - (KEYS_AT + i * KEY_GAP)) / KEY_IN));
+
+    Bar.drawPlayhead(g, W, H, x, 1, 1, L.total, (L.gridTop + L.gridBottom) / 2);
+  },
+});
+})();
+</script>
+</body>
+</html>

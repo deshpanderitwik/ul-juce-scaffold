@@ -22,11 +22,9 @@
 (() => {
 'use strict';
 
-const RHYTHM   = [0, 3, 6, 8, 11, 14];   // the cells that fill
 const FIRST_AT = 0.5;
 const GAP      = 0.4;    // between one fill and the next
 const FILL_IN  = 0.38;   // how long a fill takes to grow
-const INSET    = 11;     // px between a fill and its cell's walls
 
 Animation({
   width: 1920,
@@ -40,16 +38,11 @@ Animation({
     g.fillRect(0, 0, W, H);
     Bar.drawCells(g, W, H, 1);
 
-    RHYTHM.forEach((step, i) => {
+    Bar.RHYTHM.forEach((step, i) => {
       const age = t - (FIRST_AT + i * GAP);
       if (age <= 0) return;
-      const size = (Bar.CELL - 2 * INSET) * util.easeOutBack(age / FILL_IN);
-      const { x, y } = Bar.cell(step, W, H);
-      const pale = 0.6 * Math.exp(-age * 5);   // toward white as it arrives
-      g.fillStyle = Theme.rgba(Theme.ACCENT.map((c) => Math.round(c + (255 - c) * pale)));
-      g.beginPath();
-      g.roundRect(x - size / 2, y - size / 2, size, size, 3);
-      g.fill();
+      // Arrives pale, warming to the accent as it lands.
+      Bar.drawFill(g, W, H, step, util.easeOutBack(age / FILL_IN), 0.6 * Math.exp(-age * 5));
     });
   },
 });

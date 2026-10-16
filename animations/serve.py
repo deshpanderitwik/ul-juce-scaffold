@@ -93,6 +93,24 @@ class Handler(SimpleHTTPRequestHandler):
             super().log_message(fmt, *args)
 
 
+def video_args(alpha):
+    """Encoder settings shared with reel.py.
+
+    The frames are sRGB. Players read HD video as BT.709, so the conversion
+    uses that matrix and the file says so; ffmpeg's untagged default
+    (BT.601) shifts the accent toward yellow on playback, #ff5a3c showing
+    as #ff6838. The transfer is tagged sRGB, which QuickTime honours
+    without the gamma shift a bt709 transfer tag causes there.
+    """
+    # The tags go on the frames: the encoder takes them from there.
+    tag = 'setparams=colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:range=tv'
+    if alpha:
+        return ['-vf', f'scale=out_color_matrix=bt709:out_range=tv,format=yuva444p10le,{tag}',
+                '-c:v', 'prores_ks', '-profile:v', '4444']
+    return ['-vf', f'scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,{tag}',
+            '-c:v', 'libx264', '-preset', 'slow', '-crf', '12', '-movflags', '+faststart']
+
+
 def encode(d, frames, args):
     if not shutil.which('ffmpeg'):
         return {'ok': True, 'output': f'{frames.relative_to(ROOT)} (ffmpeg not found, frames only)'}
@@ -105,16 +123,11 @@ def encode(d, frames, args):
         if not a.is_file() or ROOT not in a.parents:
             return {'ok': False, 'error': f'audio not found: {audio}'}
         cmd += ['-i', str(a)]
-    if args.get('alpha'):
-        out = d / 'render' / f'{d.name}.mov'
-        cmd += ['-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le']
-        if audio:
-            cmd += ['-c:a', 'pcm_s16le']
-    else:
-        out = d / 'render' / f'{d.name}.mp4'
-        cmd += ['-c:v', 'libx264', '-preset', 'slow', '-crf', '12', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
-        if audio:
-            cmd += ['-c:a', 'aac', '-b:a', '320k']
+    alpha = bool(args.get('alpha'))
+    out = d / 'render' / f'{d.name}.{"mov" if alpha else "mp4"}'
+    cmd += video_args(alpha)
+    if audio:
+        cmd += ['-c:a', 'pcm_s16le'] if alpha else ['-c:a', 'aac', '-b:a', '320k']
     # The picture sets the length: the audio is cut to it, or ends early.
     cmd += ['-t', str(len(list(frames.glob('*.png'))) / int(fps))]
     cmd.append(str(out))

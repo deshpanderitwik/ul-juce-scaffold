@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Playing</title>
+</head>
+<body>
+<script src="../runtime.js"></script>
+<script src="../theme.js"></script>
+<script src="../bar.js"></script>
+<script>
+// Time starts moving. Starts on 004's last frame: sixteen cells, six of
+// them orange. A playhead draws itself at the left edge, a white line, part
+// of the structure like the cells. It starts from rest and comes up to
+// tempo like a turntable, and plays the bar. The shot ends as it comes back
+// round to the one for the third time; it doesn't stop there, 006 carries
+// on playing from the next frame.
+//
+// The playhead touches every cell, but only the music answers: each orange
+// square switches on as the line enters it, lit toward white and a little
+// larger, and stays on while the line is inside it; the part the line has
+// passed cools slowly back to orange behind it. A note is a held state,
+// not a strike. With no sound, being lit is the note sounding.
+//
+// Pure: the playhead's travel is Bar.Play, a closed form shared with the
+// shots after this one, so every frame comes from ctx.t alone.
+(() => {
+'use strict';
+
+const Play = Bar.Play;
+const APPEAR = 0.25;   // the playhead draws itself before it moves
+
+Animation({
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  duration: Play.PLAYING_FOR,
+
+  draw(ctx) {
+    const { g, width: W, height: H, t, util } = ctx;
+    g.fillStyle = Theme.bg;
+    g.fillRect(0, 0, W, H);
+    Bar.drawCells(g, W, H, 1);
+
+    const s = t + Play.START.playing;
+    const x = Bar.x0(W) + util.mod(Play.travelled(s), Bar.STEPS) * Bar.CELL;
+    Bar.drawWake(g, W, x, Play.speed(s), Bar.cy(H) - Bar.CELL / 2, Bar.CELL);
+
+    const side = Bar.CELL - 2 * Bar.FILL_INSET;
+    for (const step of Bar.RHYTHM) Bar.drawPlayedNote(g, W, step, 1, Bar.cy(H), side, s);
+
+    const shown = util.easeOut((t - APPEAR) / 0.45);
+    if (shown > 0) Bar.drawPlayhead(g, W, H, x, shown, shown);
+  },
+});
+})();
+</script>
+</body>
+</html>

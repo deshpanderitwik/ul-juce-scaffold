@@ -1,3 +1,10 @@
 {
-  "time": ["002-origin-of-time", "003-cells", "004-filling"]
+  "time": [
+    "002-origin-of-time",
+    "003-cells",
+    "004-filling",
+    "005-playing",
+    "006-rows",
+    "007-melody"
+  ]
 }

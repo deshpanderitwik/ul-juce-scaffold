@@ -50,6 +50,27 @@ Candidates, to be confirmed or killed by the explorations:
 
 Newest first. One entry per exploration or shot: what we tried, which assumption it questioned, what we learned, and any animation it produced.
 
+### 2026-10-16: exploring time, shot six: the notes become a melody
+
+- `animations/007-melody`: still playing, the six notes, all on C, become a melody one pass at a time, each change landing just behind the playhead, the way you'd edit a running loop. Bar 1: each note slides up or down from F to its pitch (F, A flat, B flat, G, E flat, C: F minor, climbing above F and falling below it). Bar 2: three of them stretch into longer notes. Bar 3: the melody plays; each note, long or short, stays lit for as long as the playhead is inside it, so length is visible as duration. 7.2 s.
+- The structure springs into being, but notes glide to their places: placing a note should look deliberate, not bouncy.
+- What the piano roll adds to the strip, in order: a vertical axis (pitch), then a second horizontal quantity (length). The strip had only *when*.
+
+### 2026-10-16: exploring time, shot five: the structure of a piano roll
+
+- Structure first, then the notes, one beat each. Pitch-first (notes floating to heights, rows forming to catch them) was the alternative; it says why the rows exist, but structure-first is clearer to read.
+- `animations/006-rows`: on a downbeat, with the music still playing, thirteen rows (B up to B) grow out of the strip, up and down at once. The strip never moves: it becomes the middle row, F, so every note entered on the grid turns out to be an F, still lighting up as the playhead passes through them. The rows start as tall as the cells and narrow toward piano-roll rows as more open, so the roll only ever grows; the columns and the playhead stretch to the full height. Then the keyboard slides out on the left and the white-key rows lift faintly off the black. Two bars, 4.8 s.
+- The strip was always one pitch; the roll just reveals which one. Putting it in the middle means the melody can go both up and down from where the rhythm was written.
+- The playhead never stops: 005 and 006 share one clock (`Bar.Play`), and the cut between them falls on a downbeat. The structure changes under music that is already running, which is the opposite of how a piano roll is used (stop, edit, play).
+- All twelve rows exist before any note needs them. The notes sitting in one row of twelve is the first look at assumption 2: every chromatic pitch is equally available, whether or not the music wants it.
+- The videos had been encoded with the SD colour matrix, so the orange played back as `#ff6838`. Encoding is now BT.709 and tagged; frames were always right.
+
+### 2026-10-16: exploring time, shot four: time starts moving
+
+- `animations/005-playing`: a white playhead draws itself at the left edge of the filled cells, comes up to tempo from rest like a turntable (100 bpm), and plays the bar until it comes round to the one for the third time, where 006 takes over without a break. Each orange cell is lit, toward white and a little larger, for as long as the line is inside it, and goes dark as the line leaves. Empty cells don't react. 9.35 s.
+- The playhead is white because it belongs to the structure; orange stays music. The line is continuous, not a step highlight, so it can grow into a piano roll's playhead in the next beat. Discrete grid, continuous time.
+- A note is a sustained "on" state, not a strike: it lights as the playhead enters and stays on while the playhead is inside it, the way a held key sounds; the part already played cools slowly back to orange behind the line. Without sound, being lit is the note sounding, and the cooling shows how much of it has been heard.
+
 ### 2026-10-16: exploring time, shots two and three: cells, and filling them
 
 - The plan for the time section, one beat per animation, joined into a reel (`animations/reels.json`, `python3 animations/reel.py time`): point → line → cells → filled cells → movement across them → the cells become a piano roll → the hand that edits it. Soundless for now.
@@ -82,3 +103,6 @@ Animations made for the video, and the part of the argument each one serves.
 | `animations/002-origin-of-time` | Assumption 1: time as a ruler | Point → line → bar, beats, eighths, sixteenths. Opening shot of the time section. |
 | `animations/003-cells` | Assumption 1 | The divided line opens into sixteen cells. |
 | `animations/004-filling` | Assumptions 1 and 3 | Cells fill in a rhythm: grid versus music. |
+| `animations/005-playing` | Assumptions 1 and 4 | A playhead plays the cells; the music answers. |
+| `animations/006-rows` | Assumption 2 | The strip grows into twelve rows and a keyboard: the piano roll's structure. |
+| `animations/007-melody` | Assumptions 2 and 3 | The notes move to pitches and lengthen, edited behind the playhead. |

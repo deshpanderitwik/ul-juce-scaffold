@@ -22,6 +22,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from serve import video_args
+
 ANIMATIONS = Path(__file__).resolve().parent
 ROOT = ANIMATIONS.parent
 
@@ -72,11 +74,7 @@ def main():
                 n += 1
         cmd = ['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(first['fps']),
                '-i', str(Path(tmp) / '%06d.png')]
-        if alpha:
-            cmd += ['-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le']
-        else:
-            cmd += ['-c:v', 'libx264', '-preset', 'slow', '-crf', '12', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
-        subprocess.run(cmd + [str(out)], check=True)
+        subprocess.run(cmd + video_args(alpha) + [str(out)], check=True)
 
     print(f'{out.relative_to(ROOT)}: {n} frames, {n / first["fps"]:.2f} s')
     for d, m in metas:

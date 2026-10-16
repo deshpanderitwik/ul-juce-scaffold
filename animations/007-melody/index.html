@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Melody</title>
+</head>
+<body>
+<script src="../runtime.js"></script>
+<script src="../theme.js"></script>
+<script src="../bar.js"></script>
+<script src="../roll.js"></script>
+<script>
+// The notes become a melody, while the music plays. Picks up on the frame
+// after 006's last: the formed roll, the six notes all on F, the playhead
+// arriving on the downbeat. Three bars, each pass changing what the next
+// one plays, the way you'd edit behind a running loop:
+//
+//   bar 1  each note slides smoothly up or down to its pitch just after
+//          the playhead plays it (Roll.MELODY: F, A flat, B flat, G,
+//          E flat, C)
+//   bar 2  three of them stretch smoothly to the right into longer notes,
+//          again just behind the playhead
+//   bar 3  the melody plays as it now is
+//
+// Edits glide rather than spring: the structure bounced into being, but a
+// note being placed should look deliberate. Every note is on for as long
+// as the playhead is inside it; the part already played cools back to
+// orange behind the line, so a long note shows its own progress.
+//
+// Ends on the next downbeat.
+//
+// Pure: every frame is computed from ctx.t alone, the playhead from the
+// clock shared with 005 and 006 (Bar.Play).
+(() => {
+'use strict';
+
+const Play = Bar.Play;
+const AFTER = 0.12;   // how long after the playhead passes a note it changes
+
+const SLIDE = 0.45;   // seconds a note takes to reach its new place
+const change = (s, util) => util.ease(s / SLIDE);
+
+Animation({
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  duration: 3 * Play.BAR,
+
+  draw(ctx) {
+    const { g, width: W, height: H, t, util } = ctx;
+    g.fillStyle = Theme.bg;
+    g.fillRect(0, 0, W, H);
+
+    const L = Roll.layout(Roll.OPEN, H);
+    Roll.drawGrid(g, W, H, L, 1);
+
+    const s = t + Play.START.melody;
+    const p = Play.travelled(s);
+    const bar0 = Play.travelled(Play.START.melody);   // where bar 1 starts, in cells
+    const x = Bar.x0(W) + util.mod(p, Bar.STEPS) * Bar.CELL;
+    Bar.drawWake(g, W, x, Play.speed(s), L.gridTop, L.total);
+
+    for (const n of Roll.MELODY) {
+      // When the playhead first reaches this note in this shot (bar 1).
+      const played = Play.reachedAt(bar0 + n.step) - Play.START.melody;
+      const y = util.lerp(L.mid[Roll.STRIP_ROW], L.mid[n.row], change(t - (played + AFTER), util));
+      const len = 1 + (n.len - 1) * change(t - (played + Play.BAR + AFTER), util);
+      Bar.drawPlayedNote(g, W, n.step, len, y, Roll.NOTE_H, s);
+    }
+
+    Roll.drawKeys(g, W, H, L, () => 1);
+    Bar.drawPlayhead(g, W, H, x, 1, 1, L.total);
+  },
+});
+})();
+</script>
+</body>
+</html>
