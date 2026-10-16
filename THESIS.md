@@ -46,6 +46,21 @@ Candidates, to be confirmed or killed by the explorations:
 - Who is it for: musicians, creative coders, or a general art audience?
 - Which assumption is the most interesting to break, and which experiment breaks it most clearly?
 
+## Next: how a digital composition forms
+
+Intention set 2026-10-16, after 007. Continue the time reel from the playing melody:
+
+1. **Encapsulate.** The melody collapses into a clip: the piano roll folds down into a compact block that still shows its notes in miniature, and the clip is placed on a timeline.
+2. **The other parts, the same way.** A drum pattern, some chords and a bassline are each written, encapsulated into a clip and placed on the timeline, following the same steps as the melody (quicker each time, since the viewer now knows the process).
+3. **Arrange.** The clips are laid out on a DAW-style timeline: tracks as lanes, clips repeated and arranged into a song form.
+
+The arc: point → line → cells → notes → piano roll → clip → track → arrangement. It shows how a digital composition is built up, one container inside another, which the rest of the video can then question.
+
+Open before building:
+- Telling four parts apart with one accent colour: shape (drums as hits, chords as stacks, bass as long low notes), position (lanes), or tints of the orange?
+- Does each part get its own written-out sequence (cells for drums, roll for the rest), or does only the melody get the full treatment and the others arrive faster?
+- Does the playhead keep running through all of it, as it has since 005?
+
 ## Log
 
 Newest first. One entry per exploration or shot: what we tried, which assumption it questioned, what we learned, and any animation it produced.
