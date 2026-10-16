@@ -50,6 +50,13 @@ Candidates, to be confirmed or killed by the explorations:
 
 Newest first. One entry per exploration or shot: what we tried, which assumption it questioned, what we learned, and any animation it produced.
 
+### 2026-10-16: exploring time, shot one: the origin of time
+
+- Starting the exploration of time (assumption 1) from before the ruler exists: a point, then a line, then musical division.
+- Visual language fixed for the shots: monochrome on black, with one accent, the Listening Room orange `#ff6e35` (`animations/theme.js`). The orange marks the origin, "the one".
+- `animations/002-origin-of-time`: the orange point appears and swells once; a line grows out of it to the right (the pair stays centred, so the point ends up at the start); then the line is divided coarse to fine (bar ends, beats, eighths, sixteenths), each level shorter and fainter, arriving left to right. Before any marker appears, the point shrinks away: the origin is gone by the time time is divided. 14.2 s.
+- Thought to carry forward: the piano roll starts at the last frame of this shot, a ruler already divided. Everything before that frame is a choice the piano roll has already made for you.
+
 ### 2026-10-16: the thesis, and somewhere to make shots
 
 - Settled on the question: going beyond the piano roll.
@@ -63,3 +70,4 @@ Animations made for the video, and the part of the argument each one serves.
 | Animation | Serves | Notes |
 |---|---|---|
 | `animations/001-blank` | — | Template; proves the clock. |
+| `animations/002-origin-of-time` | Assumption 1: time as a ruler | Point → line → bar, beats, eighths, sixteenths. Opening shot of the time section. |

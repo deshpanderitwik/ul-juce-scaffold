@@ -40,7 +40,8 @@
 //     sounding(t), starting(t0, t1) }. A note is
 //     { n, v, ch, track, start, end, beat, endBeat }: start/end in seconds.
 //     A .json score is { bpm?, notes: [{ n, beat, beats, v?, ch? }] }.
-//   util: clamp, lerp, invLerp, smoothstep, ease (cubic in-out), mod
+//   util: clamp, lerp, invLerp, smoothstep, ease (cubic in-out), easeOut (cubic),
+//     easeOutBack (overshoots, then settles), mod
 //
 // With context '2d' the runtime saves and restores the context around draw()
 // and resets its transform, so nothing leaks from one frame to the next. An
@@ -68,6 +69,8 @@ const util = {
   invLerp: (a, b, x) => (x - a) / (b - a),
   smoothstep: (a, b, x) => { const t = util.clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); },
   ease: (t) => { t = util.clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; },
+  easeOut: (t) => 1 - Math.pow(1 - util.clamp(t), 3),
+  easeOutBack: (t) => { t = util.clamp(t) - 1; return 1 + 2.70158 * t * t * t + 1.70158 * t * t; },
   mod: (x, n) => ((x % n) + n) % n,
 };
 
