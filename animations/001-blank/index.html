@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blank</title>
+</head>
+<body>
+<script src="../runtime.js"></script>
+<script>
+// The starting point for a new animation: copy this folder to NNN-name and
+// replace the drawing. What's here only proves the clock: one line, one bar
+// per pass, a dot crossing it, and the four beats flashing as it reaches them.
+// Everything is computed from ctx.beat, so any frame can be drawn on its own.
+Animation({
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  duration: 8,
+  bpm: 120,
+
+  draw(ctx) {
+    const { g, width: W, height: H, util } = ctx;
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, W, H);
+
+    const left = W * 0.2, right = W * 0.8, y = H / 2;
+    const bar = util.mod(ctx.beat, 4) / 4;          // 0..1 across one bar
+
+    g.strokeStyle = 'rgba(255,255,255,0.25)';
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(left, y);
+    g.lineTo(right, y);
+    g.stroke();
+
+    for (let b = 0; b < 4; b++) {
+      const since = util.mod(ctx.beat - b, 4);       // beats since the dot passed this tick
+      const flash = Math.exp(-since * 4);
+      const x = util.lerp(left, right, b / 4);
+      g.strokeStyle = `rgba(255,255,255,${0.25 + 0.75 * flash})`;
+      g.beginPath();
+      g.moveTo(x, y - 14 - 10 * flash);
+      g.lineTo(x, y + 14 + 10 * flash);
+      g.stroke();
+    }
+
+    g.fillStyle = '#fff';
+    g.beginPath();
+    g.arc(util.lerp(left, right, bar), y, 9, 0, Math.PI * 2);
+    g.fill();
+  },
+});
+</script>
+</body>
+</html>
