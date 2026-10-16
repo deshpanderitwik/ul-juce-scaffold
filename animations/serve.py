@@ -10,8 +10,9 @@ POST /render/start            {"anim": "/animations/NNN-name/"}
     Empties NNN-name/render/frames/.
 POST /render/frame?anim=...&n=12    body: PNG bytes
     Writes NNN-name/render/frames/00012.png.
-POST /render/finish           {"anim": ..., "fps": 60, "alpha": false, "audio": "mix.wav" | null}
-    Encodes the frames with ffmpeg: NNN-name/render/NNN-name.mp4 (H.264), or
+POST /render/finish           {"anim": ..., "fps": 60, "width": 1920, "height": 1080,
+                               "alpha": false, "audio": "mix.wav" | null}
+    Writes NNN-name/render/meta.json (for reel.py), then encodes the frames with ffmpeg: NNN-name/render/NNN-name.mp4 (H.264), or
     NNN-name.mov (ProRes 4444, keeps transparency) when alpha is set. The
     audio path is relative to the animation's folder.
 
@@ -76,6 +77,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.reply(200, {'ok': True})
 
             if url.path == '/render/finish':
+                # What reel.py needs to join this export to others.
+                meta = {'fps': int(args.get('fps') or 60), 'width': args.get('width'), 'height': args.get('height'),
+                        'frames': len(list(frames.glob('*.png'))), 'alpha': bool(args.get('alpha'))}
+                (d / 'render' / 'meta.json').write_text(json.dumps(meta, indent=2) + '\n')
                 return self.reply(200, encode(d, frames, args))
 
             self.reply(404, {'ok': False, 'error': 'unknown endpoint'})

@@ -1,5 +1,6 @@
 // The look every animation shares: monochrome on black, with one accent, the
-// Listening Room orange (#ff6e35, the same --accent as the personal website).
+// Listening Room orange (#ff5a3c, the same --accent as the personal website).
+// It sits on the red side of orange so it reads clear of saffron.
 // Greys are white at an alpha rather than fixed hex values, so a shape reads
 // the same over black and over whatever an alpha export is composited onto.
 //
@@ -10,7 +11,7 @@
 
 const rgba = (c, a = 1) => 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
 const INK = [255, 255, 255];
-const ACCENT = [255, 110, 53];
+const ACCENT = [255, 90, 60];
 
 window.Theme = {
   bg: '#000',

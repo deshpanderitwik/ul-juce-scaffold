@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cells</title>
+</head>
+<body>
+<script src="../runtime.js"></script>
+<script src="../theme.js"></script>
+<script src="../bar.js"></script>
+<script>
+// The line becomes cells. Starts on 002's last frame, the divided line. The
+// line springs open: it splits into a top and a bottom edge that fly apart,
+// overshoot and bounce back before they settle, and every division, tall or
+// short, stretches to span exactly between them: sixteen square cells, each
+// one a place where something can happen. The walls keep a quieter version
+// of the old hierarchy, so the strip still reads as four beats of four.
+//
+// Pure: every frame is computed from ctx.t alone.
+(() => {
+'use strict';
+
+const OPEN_AT  = 0.4;   // a beat on 002's last frame first
+
+Animation({
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  duration: 2.6,
+
+  draw(ctx) {
+    const { g, width: W, height: H, t, util } = ctx;
+    g.fillStyle = Theme.bg;
+    g.fillRect(0, 0, W, H);
+    // util.spring is exactly 1 once settled, so the last frame is 004's first.
+    Bar.drawCells(g, W, H, util.spring(t - OPEN_AT));
+  },
+});
+})();
+</script>
+</body>
+</html>

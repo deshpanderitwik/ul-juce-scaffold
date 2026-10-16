@@ -50,11 +50,20 @@ Candidates, to be confirmed or killed by the explorations:
 
 Newest first. One entry per exploration or shot: what we tried, which assumption it questioned, what we learned, and any animation it produced.
 
+### 2026-10-16: exploring time, shots two and three: cells, and filling them
+
+- The plan for the time section, one beat per animation, joined into a reel (`animations/reels.json`, `python3 animations/reel.py time`): point → line → cells → filled cells → movement across them → the cells become a piano roll → the hand that edits it. Soundless for now.
+- Both openings are springs, but not the same one: the line leaves the point gently (from rest, about 7% overshoot), and the cells fly open (flung, about 25% overshoot, `util.spring`). The energy rises as the structure gets more musical.
+- `animations/003-cells`: the divided line springs open into sixteen square cells. The line splits into a top and a bottom edge that fly apart, overshoot and settle, and every division stretches to span between them. The walls keep a quieter version of the old hierarchy, so it still reads as four beats of four. 2.6 s.
+- `animations/004-filling`: some cells fill with orange, one at a time, in a 3 + 3 + 2 + 3 + 3 + 2 rhythm. The grid is every place something could happen; the filled cells are the places it does. 4 s.
+- The orange now has a meaning across shots: it is where music is. First the origin, then the notes. The structure (line, divisions, cells) stays white.
+- A strip of cells is already a step sequencer: one row of time with on/off in each step. The piano roll will be this strip multiplied by pitch.
+
 ### 2026-10-16: exploring time, shot one: the origin of time
 
 - Starting the exploration of time (assumption 1) from before the ruler exists: a point, then a line, then musical division.
-- Visual language fixed for the shots: monochrome on black, with one accent, the Listening Room orange `#ff6e35` (`animations/theme.js`). The orange marks the origin, "the one".
-- `animations/002-origin-of-time`: the orange point appears and swells once; a line grows out of it to the right (the pair stays centred, so the point ends up at the start); then the line is divided coarse to fine (bar ends, beats, eighths, sixteenths), each level shorter and fainter, arriving left to right. Before any marker appears, the point shrinks away: the origin is gone by the time time is divided. 14.2 s.
+- Visual language fixed for the shots: monochrome on black, with one accent, the Listening Room orange, now `#ff5a3c` (`animations/theme.js`). It started as `#ff6e35` and moved a step redder (hue 17° to 9°) across every touchpoint, to keep it clear of saffron and its political reading. The orange marks the origin, "the one".
+- `animations/002-origin-of-time`: the orange point appears and swells once; a line springs gently out of it to the right, overshooting a little and settling (the pair stays centred, so the point drifts to the start); then the line is divided coarse to fine (bar ends, beats, eighths, sixteenths), each level shorter and fainter, arriving left to right. Before any marker appears, the point shrinks away: the origin is gone by the time time is divided. 13.2 s.
 - Thought to carry forward: the piano roll starts at the last frame of this shot, a ruler already divided. Everything before that frame is a choice the piano roll has already made for you.
 
 ### 2026-10-16: the thesis, and somewhere to make shots
@@ -71,3 +80,5 @@ Animations made for the video, and the part of the argument each one serves.
 |---|---|---|
 | `animations/001-blank` | — | Template; proves the clock. |
 | `animations/002-origin-of-time` | Assumption 1: time as a ruler | Point → line → bar, beats, eighths, sixteenths. Opening shot of the time section. |
+| `animations/003-cells` | Assumption 1 | The divided line opens into sixteen cells. |
+| `animations/004-filling` | Assumptions 1 and 3 | Cells fill in a rhythm: grid versus music. |

@@ -41,7 +41,7 @@
 //     { n, v, ch, track, start, end, beat, endBeat }: start/end in seconds.
 //     A .json score is { bpm?, notes: [{ n, beat, beats, v?, ch? }] }.
 //   util: clamp, lerp, invLerp, smoothstep, ease (cubic in-out), easeOut (cubic),
-//     easeOutBack (overshoots, then settles), mod
+//     easeOutBack (overshoots, then settles), spring(seconds since release), mod
 //
 // With context '2d' the runtime saves and restores the context around draw()
 // and resets its transform, so nothing leaks from one frame to the next. An
@@ -71,6 +71,10 @@ const util = {
   ease: (t) => { t = util.clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; },
   easeOut: (t) => 1 - Math.pow(1 - util.clamp(t), 3),
   easeOutBack: (t) => { t = util.clamp(t) - 1; return 1 + 2.70158 * t * t * t + 1.70158 * t * t; },
+  // A released spring, s seconds after release: leaves at speed, overshoots
+  // by about a quarter, rings down, and is exactly 1 from `settled` on.
+  spring: (s, damping = 6, ring = 14, settled = 1.6) =>
+    (s <= 0 ? 0 : s >= settled ? 1 : 1 - Math.exp(-damping * s) * Math.cos(ring * s)),
   mod: (x, n) => ((x % n) + n) % n,
 };
 
@@ -485,7 +489,7 @@ function Animation(def) {
       }
       await Promise.all(inflight);
       say('Encoding...');
-      const out = await post('/render/finish', { anim, fps: FPS, alpha: !!def.alpha, audio: def.audio || null });
+      const out = await post('/render/finish', { anim, fps: FPS, width: W, height: H, alpha: !!def.alpha, audio: def.audio || null });
       say('Exported ' + FRAMES + ' frames in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s\n' + out.output);
     } catch (err) {
       await Promise.allSettled(inflight);

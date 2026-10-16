@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Filling</title>
+</head>
+<body>
+<script src="../runtime.js"></script>
+<script src="../theme.js"></script>
+<script src="../bar.js"></script>
+<script>
+// Music places things on the line. Starts on 003's last frame, the empty
+// cells. One at a time, left to right, some of the cells fill with orange:
+// a square grows out of the cell's centre, overshoots a little and settles,
+// arriving pale and warming to the accent as it lands. The filled cells are
+// a rhythm, 3 + 3 + 2 + 3 + 3 + 2 sixteenths, so the difference between the
+// grid (every place something could happen) and the music (the places it
+// does) is there to see before anything moves.
+//
+// Pure: every frame is computed from ctx.t alone.
+(() => {
+'use strict';
+
+const RHYTHM   = [0, 3, 6, 8, 11, 14];   // the cells that fill
+const FIRST_AT = 0.5;
+const GAP      = 0.4;    // between one fill and the next
+const FILL_IN  = 0.38;   // how long a fill takes to grow
+const INSET    = 11;     // px between a fill and its cell's walls
+
+Animation({
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  duration: 4.0,
+
+  draw(ctx) {
+    const { g, width: W, height: H, t, util } = ctx;
+    g.fillStyle = Theme.bg;
+    g.fillRect(0, 0, W, H);
+    Bar.drawCells(g, W, H, 1);
+
+    RHYTHM.forEach((step, i) => {
+      const age = t - (FIRST_AT + i * GAP);
+      if (age <= 0) return;
+      const size = (Bar.CELL - 2 * INSET) * util.easeOutBack(age / FILL_IN);
+      const { x, y } = Bar.cell(step, W, H);
+      const pale = 0.6 * Math.exp(-age * 5);   // toward white as it arrives
+      g.fillStyle = Theme.rgba(Theme.ACCENT.map((c) => Math.round(c + (255 - c) * pale)));
+      g.beginPath();
+      g.roundRect(x - size / 2, y - size / 2, size, size, 3);
+      g.fill();
+    });
+  },
+});
+})();
+</script>
+</body>
+</html>

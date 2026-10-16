@@ -8,11 +8,13 @@
 <body>
 <script src="../runtime.js"></script>
 <script src="../theme.js"></script>
+<script src="../bar.js"></script>
 <script>
 // The origin of time. A point appears in the dark: the orange one, the
-// origin. It swells once, then a line grows out of it to the right: time
-// extending from the moment. The pair stays centred as it grows, so the
-// point drifts left and ends up at the start of the line. Then the line is
+// origin. It swells once, then a line springs out of it to the right: time
+// extending from the moment, overshooting a little and settling. The pair
+// stays centred as it grows, so the point drifts left and ends up at the
+// start of the line. Then the line is
 // divided the way music divides it, coarse to fine: the bar's two ends,
 // then beats, eighths and sixteenths. Each division is shorter and fainter
 // than the one before it, and arrives left to right. Before any of them,
@@ -27,31 +29,36 @@ const POINT_AT  = 1.0;   // the point appears
 const POINT_IN  = 0.7;   // ...and has settled
 const SWELL_AT  = 1.8;   // one slow breath before anything moves
 const SWELL_FOR = 1.4;
-const LINE_AT   = 3.4;   // the line grows out of the point
-const LINE_FOR  = 2.4;
+const LINE_AT   = 3.4;   // the line springs out of the point (settled 1.8 s later)
 const TICK_IN   = 0.55;  // how long a tick takes to grow
-const POINT_OUT_AT = 6.4;  // the point shrinks away...
+const POINT_OUT_AT = 5.4;  // the point shrinks away...
 const POINT_OUT    = 0.5;
 const MARKERS_AT   = POINT_OUT_AT + POINT_OUT + 0.15;   // ...and only then do the markers come
 
+// A gentler spring than 003's: it starts from rest instead of being flung,
+// and overshoots by about 7% rather than a quarter. Exactly 1 once settled.
+const DAMPING = 5, RING = 6, SETTLED = 1.8;
+const gentleSpring = (s) => (s <= 0 ? 0 : s >= SETTLED ? 1
+  : 1 - Math.exp(-DAMPING * s) * (Math.cos(RING * s) + DAMPING / RING * Math.sin(RING * s)));
+
 // Shape, in px at 1080p
 const POINT_R  = 11;
-const LENGTH   = 1200;   // the full line: one bar
+const LENGTH   = Bar.LENGTH;   // the full line: one bar
 
-// The divisions, coarse to fine. `at` is when the first tick of the level
-// starts growing; `stagger` the gap to the next one, left to right.
-const LEVELS = [
-  { at: MARKERS_AT,       stagger: 0.30, half: 46, alpha: 0.9,  marks: [0, 1] },
-  { at: MARKERS_AT + 1.2, stagger: 0.14, half: 31, alpha: 0.7,  marks: [1, 2, 3].map((i) => i / 4) },
-  { at: MARKERS_AT + 2.5, stagger: 0.09, half: 20, alpha: 0.48, marks: [1, 3, 5, 7].map((i) => i / 8) },
-  { at: MARKERS_AT + 3.7, stagger: 0.05, half: 12, alpha: 0.3,  marks: [1, 3, 5, 7, 9, 11, 13, 15].map((i) => i / 16) },
-];
+// The divisions, coarse to fine, as bar.js defines them (003 starts from
+// them). `at` is when the first tick of the level starts growing;
+// `stagger` the gap to the next one, left to right.
+const LEVELS = Bar.LEVELS.map((level, k) => ({
+  ...level,
+  at: MARKERS_AT + [0, 1.2, 2.5, 3.7][k],
+  stagger: [0.30, 0.14, 0.09, 0.05][k],
+}));
 
 Animation({
   width: 1920,
   height: 1080,
   fps: 60,
-  duration: 14.2,
+  duration: 13.2,
 
   draw(ctx) {
     const { g, width: W, height: H, t, util } = ctx;
@@ -61,20 +68,20 @@ Animation({
     g.lineCap = 'round';
 
     // The line, centred while it grows, so its start (the point) drifts left.
-    const grow = util.ease((t - LINE_AT) / LINE_FOR);
+    const grow = gentleSpring(t - LINE_AT);
     const len = LENGTH * grow;
     const x0 = W / 2 - len / 2;
 
     if (len > 0.5) {
-      g.strokeStyle = Theme.ink(0.55);
+      g.strokeStyle = Theme.ink(Bar.LINE_ALPHA);
       g.lineWidth = Theme.stroke;
       g.beginPath();
       g.moveTo(x0, cy);
       g.lineTo(x0 + len, cy);
       g.stroke();
 
-      // A brighter tip while it is still growing.
-      const tip = 1 - util.smoothstep(0.85, 1, grow);
+      // A brighter tip while it travels, gone as it reaches full length.
+      const tip = 1 - util.smoothstep(0.25, 0.6, t - LINE_AT);
       if (tip > 0) {
         g.fillStyle = Theme.ink(tip);
         g.beginPath();
